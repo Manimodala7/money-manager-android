@@ -38,8 +38,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.fintech.moneymanager.data.AccountBalanceEntity
 import com.fintech.moneymanager.data.BudgetEntity
 import com.fintech.moneymanager.data.CategoryCatalog
+import com.fintech.moneymanager.data.MathEvaluator
 import com.fintech.moneymanager.data.TransactionEntity
 import com.fintech.moneymanager.notifications.DailyReminderWorker
 import com.fintech.moneymanager.notifications.NotificationHelper
@@ -98,6 +100,84 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+fun CalculatorAmountField(
+    expression: String,
+    onExpressionChange: (String) -> Unit,
+    label: String = "Amount or Math (e.g. 500+120-30)"
+) {
+    val evaluated = remember(expression) { MathEvaluator.evaluate(expression) }
+    val hasOperators = expression.any { it in listOf('+', '-', '*', '/') }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OutlinedTextField(
+            value = expression,
+            onValueChange = onExpressionChange,
+            label = { Text(label) },
+            trailingIcon = {
+                if (hasOperators && evaluated != null) {
+                    Surface(
+                        color = EmeraldDark,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text(
+                            "= ₹${String.format("%,.2f", evaluated)}",
+                            color = EmeraldGreen,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        // Calculator Operator Bar (+, -, ×, ÷, =, Clear)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf("+", "-", "*", "/").forEach { op ->
+                val displayOp = when (op) {
+                    "*" -> "×"
+                    "/" -> "÷"
+                    else -> op
+                }
+                OutlinedButton(
+                    onClick = { onExpressionChange(expression + op) },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(vertical = 6.dp)
+                ) {
+                    Text(displayOp, color = EmeraldGreen, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+                }
+            }
+            Button(
+                onClick = {
+                    if (evaluated != null) {
+                        val formatted = if (evaluated % 1.0 == 0.0) evaluated.toLong().toString() else String.format(Locale.US, "%.2f", evaluated)
+                        onExpressionChange(formatted)
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black),
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 6.dp)
+            ) {
+                Text("=", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+            }
+            OutlinedButton(
+                onClick = { onExpressionChange("") },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 6.dp)
+            ) {
+                Text("C", color = DangerRed, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
@@ -108,6 +188,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
     val transactions by vm.transactions.collectAsState()
     val pendingSms by vm.pendingTransactions.collectAsState()
     val budgets by vm.budgets.collectAsState()
+    val accountBalances by vm.accountBalances.collectAsState()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -198,11 +279,13 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
             when (selectedTab) {
                 0 -> TransactionsScreen(
                     transactions = transactions,
+                    accountBalances = accountBalances,
+                    vm = vm,
                     onEditClick = { editingTransaction = it },
                     onDeleteClick = { vm.deleteTransaction(it) }
                 )
                 1 -> AnalyticsScreen(transactions)
-                2 -> BudgetScreen(transactions, budgets, vm)
+                2 -> BudgetScreen(transactions, budgets, accountBalances, vm)
                 3 -> SettingsScreen(transactions, vm)
             }
         }
@@ -221,6 +304,85 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
             }
         }
     }
+}
+
+@Composable
+fun EditCurrentBalanceDialog(
+    initialAccount: String,
+    transactions: List<TransactionEntity>,
+    accountBalances: List<AccountBalanceEntity>,
+    onSaveBalance: (String, Double) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedAcc by remember {
+        mutableStateOf(if (initialAccount in BANK_ACCOUNTS_ONLY) initialAccount else BANK_ACCOUNTS_ONLY.first())
+    }
+
+    val currentCalculatedBalance = remember(selectedAcc, transactions, accountBalances) {
+        val base = accountBalances.find { it.accountName == selectedAcc }?.baseBalance ?: 0.0
+        val inc = transactions.filter { it.bankName == selectedAcc && it.type == "INCOME" }.sumOf { it.amount }
+        val exp = transactions.filter { it.bankName == selectedAcc && it.type == "EXPENSE" }.sumOf { it.amount }
+        base + inc - exp
+    }
+
+    var balanceExpr by remember(selectedAcc) {
+        mutableStateOf(
+            if (currentCalculatedBalance == 0.0) "" else String.format(Locale.US, "%.2f", currentCalculatedBalance)
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CardBg,
+        title = {
+            Text("Set Current Bank Balance", color = EmeraldGreen, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Select your bank account and enter its actual balance right now. Future transactions will automatically add or subtract from this amount!",
+                    color = SlateGray,
+                    fontSize = 12.sp
+                )
+
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    BANK_ACCOUNTS_ONLY.forEach { acc ->
+                        FilterChip(
+                            selected = selectedAcc == acc,
+                            onClick = { selectedAcc = acc },
+                            label = { Text(acc, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                CalculatorAmountField(
+                    expression = balanceExpr,
+                    onExpressionChange = { balanceExpr = it },
+                    label = "Current Balance for $selectedAcc (₹)"
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val finalBal = MathEvaluator.evaluate(balanceExpr) ?: 0.0
+                    onSaveBalance(selectedAcc, finalBal)
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black)
+            ) {
+                Text("Update Balance", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel", color = SlateGray)
+            }
+        }
+    )
 }
 
 @Composable
@@ -380,12 +542,9 @@ fun EditTransactionDialog(
                     FilterChip(selected = type == "INCOME", onClick = { type = "INCOME" }, label = { Text("Income") })
                 }
 
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = { amountText = it },
-                    label = { Text("Amount (₹)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                CalculatorAmountField(
+                    expression = amountText,
+                    onExpressionChange = { amountText = it }
                 )
 
                 Text("Account:", color = SlateGray, fontSize = 12.sp)
@@ -442,7 +601,7 @@ fun EditTransactionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val newAmt = amountText.toDoubleOrNull() ?: tx.amount
+                    val newAmt = MathEvaluator.evaluate(amountText) ?: tx.amount
                     onSave(
                         tx.copy(
                             amount = newAmt,
@@ -486,11 +645,14 @@ fun BottomNavItem(label: String, icon: androidx.compose.ui.graphics.vector.Image
 @Composable
 fun TransactionsScreen(
     transactions: List<TransactionEntity>,
+    accountBalances: List<AccountBalanceEntity>,
+    vm: MainViewModel,
     onEditClick: (TransactionEntity) -> Unit,
     onDeleteClick: (TransactionEntity) -> Unit
 ) {
     var selectedAccountFilter by remember { mutableStateOf("All Accounts") }
     var searchQuery by remember { mutableStateOf("") }
+    var showEditBalanceModal by remember { mutableStateOf(false) }
 
     val filteredTx = transactions.filter { tx ->
         val matchesAcc = selectedAccountFilter == "All Accounts" || tx.bankName == selectedAccountFilter
@@ -502,9 +664,37 @@ fun TransactionsScreen(
         matchesAcc && matchesSearch
     }
 
+    val baseBalanceSum = if (selectedAccountFilter == "All Accounts") {
+        accountBalances.filter { it.accountName in BANK_ACCOUNTS_ONLY }.sumOf { it.baseBalance }
+    } else if (selectedAccountFilter in BANK_ACCOUNTS_ONLY) {
+        accountBalances.find { it.accountName == selectedAccountFilter }?.baseBalance ?: 0.0
+    } else {
+        0.0
+    }
+
     val totalIncome = filteredTx.filter { it.type == "INCOME" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
     val totalExpense = filteredTx.filter { it.type == "EXPENSE" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
-    val balance = totalIncome - totalExpense
+
+    // Calculate live Bank Balance including your Editable Current Balance base
+    val bankTxNet = if (selectedAccountFilter == "All Accounts") {
+        val bankOnlyTx = transactions.filter { it.bankName in BANK_ACCOUNTS_ONLY }
+        bankOnlyTx.filter { it.type == "INCOME" }.sumOf { it.amount } -
+            bankOnlyTx.filter { it.type == "EXPENSE" }.sumOf { it.amount }
+    } else {
+        filteredTx.filter { it.type == "INCOME" }.sumOf { it.amount } -
+            filteredTx.filter { it.type == "EXPENSE" }.sumOf { it.amount }
+    }
+    val liveBalance = baseBalanceSum + bankTxNet
+
+    if (showEditBalanceModal) {
+        EditCurrentBalanceDialog(
+            initialAccount = selectedAccountFilter,
+            transactions = transactions,
+            accountBalances = accountBalances,
+            onSaveBalance = { acc, newBal -> vm.setCurrentAccountBalance(acc, newBal) },
+            onDismiss = { showEditBalanceModal = false }
+        )
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -532,7 +722,11 @@ fun TransactionsScreen(
                     Spacer(modifier = Modifier.width(10.dp))
                     Text("Money Manager", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
-                Text("${filteredTx.size} items", color = SlateGray, fontSize = 12.sp)
+                TextButton(onClick = { showEditBalanceModal = true }) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Set Balance", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
             }
         }
 
@@ -552,17 +746,37 @@ fun TransactionsScreen(
             }
         }
 
-        // Balance Summary Card
+        // Balance Summary Card (Clickable to Edit Current Balance)
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = EmeraldDark),
                 shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showEditBalanceModal = true }
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text("Net Balance ($selectedAccountFilter)", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Current Balance ($selectedAccountFilter)", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                "Tap to Edit Balance ✎",
+                                color = EmeraldGreen,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text("₹${String.format("%,.2f", balance)}", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("₹${String.format("%,.2f", liveBalance)}", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
                     Spacer(modifier = Modifier.height(16.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Column {
@@ -622,7 +836,7 @@ fun TransactionsScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("No Transactions Yet", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text(
-                            "Tap the center '+' button to log an expense, or receive a Bank SMS / test in Settings!",
+                            "Tap 'Current Balance' above to set your starting bank balance, or tap '+' to add an expense!",
                             color = SlateGray,
                             fontSize = 12.sp
                         )
@@ -817,14 +1031,26 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
 fun BudgetScreen(
     transactions: List<TransactionEntity>,
     budgets: List<BudgetEntity>,
+    accountBalances: List<AccountBalanceEntity>,
     vm: MainViewModel
 ) {
     var showRepayDialog by remember { mutableStateOf(false) }
     var editingBudgetItem by remember { mutableStateOf<BudgetEntity?>(null) }
+    var editingBalanceForAccount by remember { mutableStateOf<String?>(null) }
 
     val ccSpent = transactions.filter { it.bankName == "Credit Card xx1009" && it.type == "EXPENSE" }.sumOf { it.amount }
     val ccRepaid = transactions.filter { it.bankName == "Credit Card xx1009" && it.type == "INCOME" }.sumOf { it.amount }
     val ccOutstanding = (ccSpent - ccRepaid).coerceAtLeast(0.0)
+
+    editingBalanceForAccount?.let { accName ->
+        EditCurrentBalanceDialog(
+            initialAccount = accName,
+            transactions = transactions,
+            accountBalances = accountBalances,
+            onSaveBalance = { acc, newBal -> vm.setCurrentAccountBalance(acc, newBal) },
+            onDismiss = { editingBalanceForAccount = null }
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -832,7 +1058,7 @@ fun BudgetScreen(
     ) {
         item {
             Text("Accounts & Budgets", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Tap any budget card to edit its monthly limit", color = SlateGray, fontSize = 12.sp)
+            Text("Set your Current Balance per bank or tap any limit to edit", color = SlateGray, fontSize = 12.sp)
         }
 
         // CREDIT CARD xx1009 REPAYMENT CARD
@@ -864,34 +1090,53 @@ fun BudgetScreen(
         }
 
         item {
-            Text("Bank Account Balances & Limits", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("Bank Account Balances & Monthly Limits", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
 
         items(BANK_ACCOUNTS_ONLY) { accName ->
+            val baseBal = accountBalances.find { it.accountName == accName }?.baseBalance ?: 0.0
             val accIncome = transactions.filter { it.bankName == accName && it.type == "INCOME" }.sumOf { it.amount }
             val accExpense = transactions.filter { it.bankName == accName && it.type == "EXPENSE" }.sumOf { it.amount }
-            val accBalance = accIncome - accExpense
+            val accBalance = baseBal + accIncome - accExpense
             val accBudgetObj = budgets.find { it.category == accName } ?: BudgetEntity(accName, 20000.0)
             val progress = (accExpense / accBudgetObj.monthlyLimit).toFloat().coerceIn(0f, 1f)
 
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { editingBudgetItem = accBudgetObj }
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(accName, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text("Bal: ₹${String.format("%,.2f", accBalance)}", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Surface(
+                            color = EmeraldDark,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.clickable { editingBalanceForAccount = accName }
+                        ) {
+                            Text(
+                                "Bal: ₹${String.format("%,.2f", accBalance)} ✎",
+                                color = EmeraldGreen,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        "In: +₹${accIncome.toInt()}  |  Out: -₹${accExpense.toInt()} (Limit: ₹${accBudgetObj.monthlyLimit.toInt()}) ✎",
-                        color = SlateGray,
-                        fontSize = 12.sp
-                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { editingBudgetItem = accBudgetObj },
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("In: +₹${accIncome.toInt()}  |  Out: -₹${accExpense.toInt()}", color = SlateGray, fontSize = 12.sp)
+                        Text("Spend Limit: ₹${accBudgetObj.monthlyLimit.toInt()} ✎", color = SlateGray, fontSize = 12.sp)
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
                         progress = { progress },
@@ -946,18 +1191,16 @@ fun BudgetScreen(
             containerColor = CardBg,
             title = { Text("Edit Monthly Limit: ${bItem.category}", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
-                    value = newLimitText,
-                    onValueChange = { newLimitText = it },
-                    label = { Text("Monthly Limit (₹)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                CalculatorAmountField(
+                    expression = newLimitText,
+                    onExpressionChange = { newLimitText = it },
+                    label = "Monthly Limit (₹)"
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        val lim = newLimitText.toDoubleOrNull() ?: bItem.monthlyLimit
+                        val lim = MathEvaluator.evaluate(newLimitText) ?: bItem.monthlyLimit
                         vm.updateBudget(bItem.category, lim)
                         editingBudgetItem = null
                     },
@@ -997,18 +1240,17 @@ fun BudgetScreen(
                             Text(acc, color = Color.White, fontSize = 14.sp)
                         }
                     }
-                    OutlinedTextField(
-                        value = repayAmount,
-                        onValueChange = { repayAmount = it },
-                        label = { Text("Repayment Amount (₹)") },
-                        modifier = Modifier.fillMaxWidth()
+                    CalculatorAmountField(
+                        expression = repayAmount,
+                        onExpressionChange = { repayAmount = it },
+                        label = "Repayment Amount (₹)"
                     )
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        val amt = repayAmount.toDoubleOrNull() ?: 0.0
+                        val amt = MathEvaluator.evaluate(repayAmount) ?: 0.0
                         if (amt > 0) {
                             vm.recordCreditCardRepayment(amt, fromAccount)
                             showRepayDialog = false
@@ -1073,7 +1315,6 @@ fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
             }
         }
 
-        // Export & Reset Data Card
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
@@ -1158,7 +1399,7 @@ fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
 fun QuickAddTransactionSheet(
     onSave: (Double, String, String, String, String, String, String) -> Unit
 ) {
-    var amountText by remember { mutableStateOf("") }
+    var amountExpr by remember { mutableStateOf("") }
     var type by remember { mutableStateOf("EXPENSE") }
     var category by remember { mutableStateOf(CategoryCatalog.allCategories.first()) }
     val subCategories = CategoryCatalog.getSubCategories(category)
@@ -1194,12 +1435,10 @@ fun QuickAddTransactionSheet(
             )
         }
 
-        OutlinedTextField(
-            value = amountText,
-            onValueChange = { amountText = it },
-            label = { Text("Amount (₹)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+        // Built-in Live Calculator Input Field
+        CalculatorAmountField(
+            expression = amountExpr,
+            onExpressionChange = { amountExpr = it }
         )
 
         Text("Select Account", color = SlateGray, fontSize = 12.sp)
@@ -1271,7 +1510,7 @@ fun QuickAddTransactionSheet(
 
         Button(
             onClick = {
-                val amt = amountText.toDoubleOrNull() ?: 0.0
+                val amt = MathEvaluator.evaluate(amountExpr) ?: 0.0
                 if (amt > 0) {
                     onSave(amt, type, category, subCategory, paymentMode, selectedAccount, note)
                 }
@@ -1279,7 +1518,13 @@ fun QuickAddTransactionSheet(
             colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black),
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
-            Text("Save Transaction", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            val preview = MathEvaluator.evaluate(amountExpr)
+            val btnLabel = if (preview != null && preview > 0) {
+                "Save Transaction (₹${String.format("%,.2f", preview)})"
+            } else {
+                "Save Transaction"
+            }
+            Text(btnLabel, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
         Spacer(modifier = Modifier.height(16.dp))
     }
