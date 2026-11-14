@@ -31,12 +31,28 @@ data class AccountBalanceEntity(
 )
 
 // Built-in Calculator Engine for Amount Fields (supports +, -, *, /)
+// Pure Kotlin Calculator Engine (No Regex needed - supports +, -, *, /)
 object MathEvaluator {
     fun evaluate(expression: String): Double? {
         val clean = expression.replace(",", "").replace("₹", "").replace(" ", "")
         if (clean.isEmpty()) return null
         return try {
-            val tokens = Regex("""(?=[+\-*/])|(?<=[+\-*/])""").split(clean).filter { it.isNotEmpty() }
+            val tokens = mutableListOf<String>()
+            var currentNum = StringBuilder()
+            for (ch in clean) {
+                if (ch == '+' || ch == '-' || ch == '*' || ch == '/') {
+                    if (currentNum.isNotEmpty()) {
+                        tokens.add(currentNum.toString())
+                        currentNum.clear()
+                    }
+                    tokens.add(ch.toString())
+                } else {
+                    currentNum.append(ch)
+                }
+            }
+            if (currentNum.isNotEmpty()) {
+                tokens.add(currentNum.toString())
+            }
             if (tokens.isEmpty()) return null
 
             val values = mutableListOf<Double>()
