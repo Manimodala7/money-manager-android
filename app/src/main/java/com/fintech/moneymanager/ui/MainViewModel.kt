@@ -29,6 +29,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         type: String,
         category: String,
         paymentMode: String,
+        accountName: String,
         note: String
     ) {
         viewModelScope.launch {
@@ -38,23 +39,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     type = type,
                     category = category,
                     paymentMode = paymentMode,
-                    merchantOrNote = note.ifBlank { category },
+                    merchantOrNote = note.ifBlank { "$category ($accountName)" },
+                    bankName = accountName,
                     isPendingApproval = false
                 )
             )
             checkBudgetThreshold(category)
+            checkBudgetThreshold(accountName)
         }
     }
 
-    fun approvePendingTransaction(item: TransactionEntity, selectedCategory: String) {
+    // Credit Card Repayment: Deducts from chosen Bank A/c and reduces Credit Card xx1009 outstanding
+    fun recordCreditCardRepayment(amount: Double, fromBankAccount: String) {
+        viewModelScope.launch {
+            // 1. Deduct from the paying bank account
+            dao.insertTransaction(
+                TransactionEntity(
+                    amount = amount,
+                    type = "EXPENSE",
+                    category = "CC Bill Repayment",
+                    paymentMode = "Bank Transfer",
+                    merchantOrNote = "Paid Credit Card xx1009 from $fromBankAccount",
+                    bankName = fromBankAccount,
+                    isPendingApproval = false
+                )
+            )
+            // 2. Credit the card account so outstanding balance drops
+            dao.insertTransaction(
+                TransactionEntity(
+                    amount = amount,
+                    type = "INCOME",
+                    category = "CC Bill Repayment",
+                    paymentMode = "Credit Card",
+                    merchantOrNote = "Repayment received from $fromBankAccount",
+                    bankName = "Credit Card xx1009",
+                    isPendingApproval = false
+                )
+            )
+        }
+    }
+
+    fun approvePendingTransaction(
+        item: TransactionEntity,
+        selectedCategory: String,
+        selectedAccount: String,
+        customNote: String
+    ) {
         viewModelScope.launch {
             dao.updateTransaction(
                 item.copy(
                     category = selectedCategory,
+                    bankName = selectedAccount,
+                    merchantOrNote = customNote.ifBlank { item.merchantOrNote },
                     isPendingApproval = false
                 )
             )
             checkBudgetThreshold(selectedCategory)
+            checkBudgetThreshold(selectedAccount)
         }
     }
 
@@ -64,15 +105,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun updateBudget(category: String, limit: Double) {
+    fun updateBudget(categoryOrAccount: String, limit: Double) {
         viewModelScope.launch {
-            dao.upsertBudget(BudgetEntity(category, limit))
+            dao.upsertBudget(BudgetEntity(categoryOrAccount, limit))
         }
     }
 
     fun simulateBankSms(rawMessage: String) {
         viewModelScope.launch {
-            val parsed = BankSmsParser.parse("VM-HDFCBK", rawMessage)
+            val parsed = BankSmsParser.parse("BANK-SMS", rawMessage)
             if (parsed != null) {
                 dao.insertTransaction(
                     TransactionEntity(
