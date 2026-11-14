@@ -20,12 +20,15 @@ interface AppDao {
     @Delete
     suspend fun deleteTransaction(transaction: TransactionEntity)
 
+    @Query("DELETE FROM transactions")
+    suspend fun clearAllTransactions()
+
     @Query("SELECT * FROM budgets")
     fun getAllBudgets(): Flow<List<BudgetEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBudget(budget: BudgetEntity)
 
-    @Query("SELECT SUM(amount) FROM transactions WHERE type = 'EXPENSE' AND category = :category AND isPendingApproval = 0")
+    @Query("SELECT SUM(amount) FROM transactions WHERE type = 'EXPENSE' AND (category = :category OR bankName = :category) AND isPendingApproval = 0")
     suspend fun getTotalSpentForCategory(category: String): Double?
 }
