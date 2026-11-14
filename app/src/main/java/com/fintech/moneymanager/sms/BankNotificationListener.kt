@@ -4,6 +4,7 @@ import android.app.Notification
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.fintech.moneymanager.data.AppDatabase
+import com.fintech.moneymanager.data.CategoryCatalog
 import com.fintech.moneymanager.data.TransactionEntity
 import com.fintech.moneymanager.notifications.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
@@ -13,7 +14,6 @@ import kotlinx.coroutines.launch
 class BankNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val packageName = sbn?.packageName ?: return
-        // Ignore notifications from our own app so it doesn't loop
         if (packageName == applicationContext.packageName) return
 
         val extras = sbn.notification?.extras ?: return
@@ -23,6 +23,7 @@ class BankNotificationListener : NotificationListenerService() {
             ?: return
 
         val parsed = BankSmsParser.parse(title, text) ?: return
+        val (autoCat, autoSubCat) = CategoryCatalog.autoDetectCategory(text, parsed.type)
 
         CoroutineScope(Dispatchers.IO).launch {
             val db = AppDatabase.getDatabase(applicationContext)
@@ -30,7 +31,8 @@ class BankNotificationListener : NotificationListenerService() {
                 TransactionEntity(
                     amount = parsed.amount,
                     type = parsed.type,
-                    category = "Uncategorized",
+                    category = autoCat,
+                    subCategory = autoSubCat,
                     paymentMode = parsed.paymentMode,
                     merchantOrNote = parsed.merchant,
                     bankName = parsed.bankName,
@@ -42,7 +44,7 @@ class BankNotificationListener : NotificationListenerService() {
                 context = applicationContext,
                 amount = parsed.amount,
                 type = parsed.type,
-                merchant = parsed.merchant,
+                merchant = "${parsed.merchant} ($autoSubCat)",
                 bank = parsed.bankName
             )
         }
