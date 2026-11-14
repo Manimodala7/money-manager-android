@@ -1,6 +1,7 @@
 package com.fintech.moneymanager
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -38,14 +39,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import com.fintech.moneymanager.data.AccountBalanceEntity
+import com.fintech.moneymanager.data.AppDatabase
 import com.fintech.moneymanager.data.BudgetEntity
-import com.fintech.moneymanager.data.CategoryCatalog
-import com.fintech.moneymanager.data.MathEvaluator
 import com.fintech.moneymanager.data.TransactionEntity
 import com.fintech.moneymanager.notifications.DailyReminderWorker
 import com.fintech.moneymanager.notifications.NotificationHelper
 import com.fintech.moneymanager.ui.MainViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -70,6 +71,98 @@ val BANK_ACCOUNTS_ONLY = listOf(
     "ICICI Bank XX002",
     "Slice xx9448"
 )
+
+// Self-contained Calculator Engine (supports +, -, *, /)
+object LocalMathEvaluator {
+    fun evaluate(expression: String): Double? {
+        val clean = expression.replace(",", "").replace("₹", "").replace(" ", "")
+        if (clean.isEmpty()) return null
+        return try {
+            val tokens = mutableListOf<String>()
+            val currentNum = StringBuilder()
+            for (ch in clean) {
+                if (ch == '+' || ch == '-' || ch == '*' || ch == '/') {
+                    if (currentNum.isNotEmpty()) {
+                        tokens.add(currentNum.toString())
+                        currentNum.clear()
+                    }
+                    tokens.add(ch.toString())
+                } else {
+                    currentNum.append(ch)
+                }
+            }
+            if (currentNum.isNotEmpty()) {
+                tokens.add(currentNum.toString())
+            }
+            if (tokens.isEmpty()) return null
+
+            val values = mutableListOf<Double>()
+            val ops = mutableListOf<String>()
+
+            var i = 0
+            while (i < tokens.size) {
+                val t = tokens[i]
+                if ((t == "+" || t == "-") && (i == 0 || tokens[i - 1] in listOf("+", "-", "*", "/"))) {
+                    val nextVal = tokens.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
+                    values.add(if (t == "-") -nextVal else nextVal)
+                    i += 2
+                } else if (t in listOf("+", "-", "*", "/")) {
+                    ops.add(t)
+                    i++
+                } else {
+                    val v = t.toDoubleOrNull() ?: return null
+                    if (ops.isNotEmpty() && (ops.last() == "*" || ops.last() == "/")) {
+                        val op = ops.removeAt(ops.lastIndex)
+                        val prev = values.removeAt(values.lastIndex)
+                        values.add(if (op == "*") prev * v else if (v != 0.0) prev / v else 0.0)
+                    } else {
+                        values.add(v)
+                    }
+                    i++
+                }
+            }
+
+            var result = values.firstOrNull() ?: return null
+            var opIdx = 0
+            for (vIdx in 1 until values.size) {
+                val op = ops.getOrNull(opIdx++) ?: break
+                if (op == "+") result += values[vIdx]
+                else if (op == "-") result -= values[vIdx]
+            }
+            result
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
+
+// Self-contained 16 Categories & 85+ Sub-Categories Catalog
+object LocalCategoryCatalog {
+    val map: Map<String, List<String>> = linkedMapOf(
+        "Food & Dining" to listOf("Zomato", "Swiggy", "Dineout", "Order", "Bought", "Cafe & Tea", "Street Food", "Snacks"),
+        "Groceries" to listOf("Blinkit", "Zepto", "Instamart", "BigBasket", "DMart / Store", "Milk & Dairy", "Veggies & Fruits"),
+        "Shopping" to listOf("Amazon", "Flipkart", "Myntra", "Ajio", "Electronics", "Clothing", "Footwear", "Home & Kitchen"),
+        "Transport & Fuel" to listOf("Uber", "Ola", "Rapido", "Namma Yatri", "Petrol / Fuel", "Metro / Bus", "FASTag / Toll", "Parking"),
+        "Bills & Utilities" to listOf("Mobile Recharge", "WiFi / Broadband", "Electricity", "Water / Gas", "DTH", "Subscriptions"),
+        "Housing & Rent" to listOf("House Rent", "Maintenance", "Maid / Cook", "Laundry", "Repairs & Plumbing"),
+        "Entertainment" to listOf("Movies / BookMyShow", "Netflix / OTT", "Spotify / YouTube", "Gaming", "Events & Outing"),
+        "Investments" to listOf("IPO", "Mutual Funds / SIP", "Stocks / Equity", "Gold / SGB", "FD / RD", "Crypto"),
+        "Health & Fitness" to listOf("Pharmacy / Meds", "Doctor Visit", "Lab Tests", "Gym / Cult", "Sports"),
+        "Travel & Trips" to listOf("IRCTC / Trains", "Flights", "Hotels / Stay", "RedBus / Bus", "Holiday Spend"),
+        "Personal Care" to listOf("Salon / Haircut", "Grooming / Skincare", "Spa & Wellness"),
+        "Education & Work" to listOf("Online Courses", "Books", "Software / AI Tools", "Stationery"),
+        "Gifts & Family" to listOf("Sent to Family", "Friends Split", "Gift / Festival", "Charity / Temple"),
+        "EMI & Loans" to listOf("Credit Card EMI", "Personal Loan", "Vehicle EMI", "Slice / BNPL"),
+        "Income / Credits" to listOf("Salary", "Cashback", "Friend Refund", "IPO / Stock Profit", "Interest / Dividend", "Bonus"),
+        "Self Transfer" to listOf("CC Bill Repayment", "Bank to Bank", "ATM Cash Withdrawal", "UPI Lite / Wallet")
+    )
+
+    val allCategories: List<String> = map.keys.toList()
+
+    fun getSubCategories(category: String): List<String> {
+        return map[category] ?: listOf("General", "Order", "Bought", "Online", "Offline")
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,7 +199,7 @@ fun CalculatorAmountField(
     onExpressionChange: (String) -> Unit,
     label: String = "Amount or Math (e.g. 500+120-30)"
 ) {
-    val evaluated = remember(expression) { MathEvaluator.evaluate(expression) }
+    val evaluated = remember(expression) { LocalMathEvaluator.evaluate(expression) }
     val hasOperators = expression.any { it in listOf('+', '-', '*', '/') }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -135,7 +228,6 @@ fun CalculatorAmountField(
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Calculator Operator Bar (+, -, ×, ÷, =, Clear)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -181,14 +273,36 @@ fun CalculatorAmountField(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val dao = remember { AppDatabase.getDatabase(context).appDao() }
+    val prefs = remember { context.getSharedPreferences("money_manager_balances", Context.MODE_PRIVATE) }
+
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAddSheet by remember { mutableStateOf(false) }
     var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
 
+    // Reactive map of base balances per bank account stored in SharedPreferences
+    var baseBalances by remember {
+        mutableStateOf(
+            BANK_ACCOUNTS_ONLY.associateWith { acc ->
+                prefs.getFloat("base_$acc", 0f).toDouble()
+            }
+        )
+    }
+
+    fun updateCurrentBankBalance(accountName: String, desiredCurrentBalance: Double, allTx: List<TransactionEntity>) {
+        val accTx = allTx.filter { it.bankName == accountName }
+        val txIncome = accTx.filter { it.type == "INCOME" }.sumOf { it.amount }
+        val txExpense = accTx.filter { it.type == "EXPENSE" }.sumOf { it.amount }
+        val newBase = desiredCurrentBalance - (txIncome - txExpense)
+        prefs.edit().putFloat("base_$accountName", newBase.toFloat()).apply()
+        baseBalances = baseBalances.toMutableMap().apply { put(accountName, newBase) }
+    }
+
     val transactions by vm.transactions.collectAsState()
     val pendingSms by vm.pendingTransactions.collectAsState()
     val budgets by vm.budgets.collectAsState()
-    val accountBalances by vm.accountBalances.collectAsState()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -207,7 +321,17 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
             item = currentPending,
             pendingCount = pendingSms.size,
             onApprove = { cat, subCat, acc, note ->
-                vm.approvePendingTransaction(currentPending, cat, subCat, acc, note)
+                val finalNote = if (note.startsWith("[")) note else "[$subCat] $note"
+                scope.launch(Dispatchers.IO) {
+                    dao.updateTransaction(
+                        currentPending.copy(
+                            category = cat,
+                            bankName = acc,
+                            merchantOrNote = finalNote,
+                            isPendingApproval = false
+                        )
+                    )
+                }
             },
             onDismiss = {
                 vm.dismissPendingTransaction(currentPending)
@@ -220,11 +344,15 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
         EditTransactionDialog(
             tx = txToEdit,
             onSave = { updatedTx ->
-                vm.editTransaction(updatedTx)
+                scope.launch(Dispatchers.IO) {
+                    dao.updateTransaction(updatedTx)
+                }
                 editingTransaction = null
             },
             onDelete = {
-                vm.deleteTransaction(txToEdit)
+                scope.launch(Dispatchers.IO) {
+                    dao.deleteTransaction(txToEdit)
+                }
                 editingTransaction = null
             },
             onDismiss = { editingTransaction = null }
@@ -279,14 +407,30 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
             when (selectedTab) {
                 0 -> TransactionsScreen(
                     transactions = transactions,
-                    accountBalances = accountBalances,
-                    vm = vm,
+                    baseBalances = baseBalances,
+                    onUpdateBalance = { acc, newBal -> updateCurrentBankBalance(acc, newBal, transactions) },
                     onEditClick = { editingTransaction = it },
-                    onDeleteClick = { vm.deleteTransaction(it) }
+                    onDeleteClick = { tx ->
+                        scope.launch(Dispatchers.IO) { dao.deleteTransaction(tx) }
+                    }
                 )
                 1 -> AnalyticsScreen(transactions)
-                2 -> BudgetScreen(transactions, budgets, accountBalances, vm)
-                3 -> SettingsScreen(transactions, vm)
+                2 -> BudgetScreen(
+                    transactions = transactions,
+                    budgets = budgets,
+                    baseBalances = baseBalances,
+                    onUpdateBalance = { acc, newBal -> updateCurrentBankBalance(acc, newBal, transactions) },
+                    vm = vm
+                )
+                3 -> SettingsScreen(
+                    transactions = transactions,
+                    vm = vm,
+                    onClearAll = {
+                        scope.launch(Dispatchers.IO) {
+                            transactions.forEach { dao.deleteTransaction(it) }
+                        }
+                    }
+                )
             }
         }
 
@@ -297,7 +441,20 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
             ) {
                 QuickAddTransactionSheet(
                     onSave = { amount, type, category, subCategory, mode, account, note ->
-                        vm.addTransaction(amount, type, category, subCategory, mode, account, note)
+                        val formattedNote = if (note.isBlank()) "[$subCategory] $category" else "[$subCategory] $note"
+                        scope.launch(Dispatchers.IO) {
+                            dao.insertTransaction(
+                                TransactionEntity(
+                                    amount = amount,
+                                    type = type,
+                                    category = category,
+                                    paymentMode = mode,
+                                    merchantOrNote = formattedNote,
+                                    bankName = account,
+                                    isPendingApproval = false
+                                )
+                            )
+                        }
                         showAddSheet = false
                     }
                 )
@@ -310,7 +467,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
 fun EditCurrentBalanceDialog(
     initialAccount: String,
     transactions: List<TransactionEntity>,
-    accountBalances: List<AccountBalanceEntity>,
+    baseBalances: Map<String, Double>,
     onSaveBalance: (String, Double) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -318,8 +475,8 @@ fun EditCurrentBalanceDialog(
         mutableStateOf(if (initialAccount in BANK_ACCOUNTS_ONLY) initialAccount else BANK_ACCOUNTS_ONLY.first())
     }
 
-    val currentCalculatedBalance = remember(selectedAcc, transactions, accountBalances) {
-        val base = accountBalances.find { it.accountName == selectedAcc }?.baseBalance ?: 0.0
+    val currentCalculatedBalance = remember(selectedAcc, transactions, baseBalances) {
+        val base = baseBalances[selectedAcc] ?: 0.0
         val inc = transactions.filter { it.bankName == selectedAcc && it.type == "INCOME" }.sumOf { it.amount }
         val exp = transactions.filter { it.bankName == selectedAcc && it.type == "EXPENSE" }.sumOf { it.amount }
         base + inc - exp
@@ -368,7 +525,7 @@ fun EditCurrentBalanceDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val finalBal = MathEvaluator.evaluate(balanceExpr) ?: 0.0
+                    val finalBal = LocalMathEvaluator.evaluate(balanceExpr) ?: 0.0
                     onSaveBalance(selectedAcc, finalBal)
                     onDismiss()
                 },
@@ -392,11 +549,13 @@ fun TransactionApprovalPopupDialog(
     onApprove: (String, String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var selectedCat by remember(item.id) { mutableStateOf(item.category.ifBlank { "Food & Dining" }) }
-    val subCatList = CategoryCatalog.getSubCategories(selectedCat)
-    var selectedSubCat by remember(item.id, selectedCat) {
-        mutableStateOf(if (item.subCategory in subCatList) item.subCategory else subCatList.first())
+    var selectedCat by remember(item.id) {
+        mutableStateOf(
+            if (item.category in LocalCategoryCatalog.allCategories) item.category else LocalCategoryCatalog.allCategories.first()
+        )
     }
+    val subCatList = LocalCategoryCatalog.getSubCategories(selectedCat)
+    var selectedSubCat by remember(item.id, selectedCat) { mutableStateOf(subCatList.first()) }
     var selectedAcc by remember(item.id) { mutableStateOf(item.bankName) }
     var note by remember(item.id) { mutableStateOf(item.merchantOrNote) }
 
@@ -451,7 +610,7 @@ fun TransactionApprovalPopupDialog(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    CategoryCatalog.allCategories.forEach { cat ->
+                    LocalCategoryCatalog.allCategories.forEach { cat ->
                         FilterChip(
                             selected = selectedCat == cat,
                             onClick = { selectedCat = cat },
@@ -509,13 +668,15 @@ fun EditTransactionDialog(
     var amountText by remember { mutableStateOf(tx.amount.toString()) }
     var type by remember { mutableStateOf(tx.type) }
     var selectedAcc by remember { mutableStateOf(tx.bankName) }
-    var selectedCat by remember { mutableStateOf(tx.category) }
-    val subCatList = CategoryCatalog.getSubCategories(selectedCat)
-    var selectedSubCat by remember(selectedCat) {
-        mutableStateOf(if (tx.subCategory in subCatList) tx.subCategory else subCatList.first())
+    var selectedCat by remember {
+        mutableStateOf(
+            if (tx.category in LocalCategoryCatalog.allCategories) tx.category else LocalCategoryCatalog.allCategories.first()
+        )
     }
+    val subCatList = LocalCategoryCatalog.getSubCategories(selectedCat)
+    var selectedSubCat by remember(selectedCat) { mutableStateOf(subCatList.first()) }
     var paymentMode by remember { mutableStateOf(tx.paymentMode) }
-    var note by remember { mutableStateOf(tx.merchantOrNote) }
+    var note by remember { mutableStateOf(tx.merchantOrNote.replace(Regex("""^\[.*?\]\s*"""), "")) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -566,7 +727,7 @@ fun EditTransactionDialog(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    CategoryCatalog.allCategories.forEach { cat ->
+                    LocalCategoryCatalog.allCategories.forEach { cat ->
                         FilterChip(
                             selected = selectedCat == cat,
                             onClick = { selectedCat = cat },
@@ -601,16 +762,16 @@ fun EditTransactionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val newAmt = MathEvaluator.evaluate(amountText) ?: tx.amount
+                    val newAmt = LocalMathEvaluator.evaluate(amountText) ?: tx.amount
+                    val updatedNote = if (note.isBlank()) "[$selectedSubCat] $selectedCat" else "[$selectedSubCat] $note"
                     onSave(
                         tx.copy(
                             amount = newAmt,
                             type = type,
                             bankName = selectedAcc,
                             category = selectedCat,
-                            subCategory = selectedSubCat,
                             paymentMode = paymentMode,
-                            merchantOrNote = note
+                            merchantOrNote = updatedNote
                         )
                     )
                 },
@@ -645,8 +806,8 @@ fun BottomNavItem(label: String, icon: androidx.compose.ui.graphics.vector.Image
 @Composable
 fun TransactionsScreen(
     transactions: List<TransactionEntity>,
-    accountBalances: List<AccountBalanceEntity>,
-    vm: MainViewModel,
+    baseBalances: Map<String, Double>,
+    onUpdateBalance: (String, Double) -> Unit,
     onEditClick: (TransactionEntity) -> Unit,
     onDeleteClick: (TransactionEntity) -> Unit
 ) {
@@ -659,23 +820,21 @@ fun TransactionsScreen(
         val matchesSearch = searchQuery.isBlank() ||
             tx.merchantOrNote.contains(searchQuery, true) ||
             tx.category.contains(searchQuery, true) ||
-            tx.subCategory.contains(searchQuery, true) ||
             tx.amount.toString().contains(searchQuery)
         matchesAcc && matchesSearch
     }
 
     val baseBalanceSum = if (selectedAccountFilter == "All Accounts") {
-        accountBalances.filter { it.accountName in BANK_ACCOUNTS_ONLY }.sumOf { it.baseBalance }
+        BANK_ACCOUNTS_ONLY.sumOf { baseBalances[it] ?: 0.0 }
     } else if (selectedAccountFilter in BANK_ACCOUNTS_ONLY) {
-        accountBalances.find { it.accountName == selectedAccountFilter }?.baseBalance ?: 0.0
+        baseBalances[selectedAccountFilter] ?: 0.0
     } else {
         0.0
     }
 
-    val totalIncome = filteredTx.filter { it.type == "INCOME" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
-    val totalExpense = filteredTx.filter { it.type == "EXPENSE" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
+    val totalIncome = filteredTx.filter { it.type == "INCOME" && !it.category.contains("Repayment", true) }.sumOf { it.amount }
+    val totalExpense = filteredTx.filter { it.type == "EXPENSE" && !it.category.contains("Repayment", true) }.sumOf { it.amount }
 
-    // Calculate live Bank Balance including your Editable Current Balance base
     val bankTxNet = if (selectedAccountFilter == "All Accounts") {
         val bankOnlyTx = transactions.filter { it.bankName in BANK_ACCOUNTS_ONLY }
         bankOnlyTx.filter { it.type == "INCOME" }.sumOf { it.amount } -
@@ -690,8 +849,8 @@ fun TransactionsScreen(
         EditCurrentBalanceDialog(
             initialAccount = selectedAccountFilter,
             transactions = transactions,
-            accountBalances = accountBalances,
-            onSaveBalance = { acc, newBal -> vm.setCurrentAccountBalance(acc, newBal) },
+            baseBalances = baseBalances,
+            onSaveBalance = onUpdateBalance,
             onDismiss = { showEditBalanceModal = false }
         )
     }
@@ -767,7 +926,7 @@ fun TransactionsScreen(
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Text(
-                                "Tap to Edit Balance ✎",
+                                "Edit Balance ✎",
                                 color = EmeraldGreen,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -836,7 +995,7 @@ fun TransactionsScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("No Transactions Yet", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text(
-                            "Tap 'Current Balance' above to set your starting bank balance, or tap '+' to add an expense!",
+                            "Tap 'Edit Balance ✎' above to enter your current bank balance, or tap '+' to add an expense!",
                             color = SlateGray,
                             fontSize = 12.sp
                         )
@@ -880,19 +1039,8 @@ fun TransactionRow(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Surface(color = EmeraldDark, shape = RoundedCornerShape(6.dp)) {
-                        Text(
-                            tx.subCategory,
-                            color = EmeraldGreen,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    Text(tx.category, color = SlateGray, fontSize = 11.sp)
-                }
-                Spacer(modifier = Modifier.height(4.dp))
+                Text(tx.category, color = EmeraldGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(tx.merchantOrNote, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                 Text("${tx.bankName} • ${tx.paymentMode} • $dateStr", color = SlateGray, fontSize = 11.sp)
             }
@@ -917,11 +1065,9 @@ fun TransactionRow(
 
 @Composable
 fun AnalyticsScreen(transactions: List<TransactionEntity>) {
-    val expenses = transactions.filter { it.type == "EXPENSE" && it.subCategory != "CC Bill Repayment" }
+    val expenses = transactions.filter { it.type == "EXPENSE" && !it.category.contains("Repayment", true) }
     val totalSpend = expenses.sumOf { it.amount }.coerceAtLeast(1.0)
     val byCategory = expenses.groupBy { it.category }.mapValues { it.value.sumOf { tx -> tx.amount } }
-        .entries.sortedByDescending { it.value }
-    val bySubCategory = expenses.groupBy { "${it.subCategory} (${it.category})" }.mapValues { it.value.sumOf { tx -> tx.amount } }
         .entries.sortedByDescending { it.value }
     val byAccount = expenses.groupBy { it.bankName }.mapValues { it.value.sumOf { tx -> tx.amount } }
 
@@ -983,10 +1129,10 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
         }
 
         item {
-            Text("Sub-Category Breakdown (Zomato, Swiggy, etc.)", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("Spend by Category", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
 
-        items(bySubCategory) { entry ->
+        items(byCategory) { entry ->
             val pct = ((entry.value / totalSpend) * 100).toInt()
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
@@ -1031,7 +1177,8 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
 fun BudgetScreen(
     transactions: List<TransactionEntity>,
     budgets: List<BudgetEntity>,
-    accountBalances: List<AccountBalanceEntity>,
+    baseBalances: Map<String, Double>,
+    onUpdateBalance: (String, Double) -> Unit,
     vm: MainViewModel
 ) {
     var showRepayDialog by remember { mutableStateOf(false) }
@@ -1046,8 +1193,8 @@ fun BudgetScreen(
         EditCurrentBalanceDialog(
             initialAccount = accName,
             transactions = transactions,
-            accountBalances = accountBalances,
-            onSaveBalance = { acc, newBal -> vm.setCurrentAccountBalance(acc, newBal) },
+            baseBalances = baseBalances,
+            onSaveBalance = onUpdateBalance,
             onDismiss = { editingBalanceForAccount = null }
         )
     }
@@ -1058,7 +1205,7 @@ fun BudgetScreen(
     ) {
         item {
             Text("Accounts & Budgets", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Set your Current Balance per bank or tap any limit to edit", color = SlateGray, fontSize = 12.sp)
+            Text("Tap 'Bal ✎' to set your current bank balance, or tap any limit to edit", color = SlateGray, fontSize = 12.sp)
         }
 
         // CREDIT CARD xx1009 REPAYMENT CARD
@@ -1094,7 +1241,7 @@ fun BudgetScreen(
         }
 
         items(BANK_ACCOUNTS_ONLY) { accName ->
-            val baseBal = accountBalances.find { it.accountName == accName }?.baseBalance ?: 0.0
+            val baseBal = baseBalances[accName] ?: 0.0
             val accIncome = transactions.filter { it.bankName == accName && it.type == "INCOME" }.sumOf { it.amount }
             val accExpense = transactions.filter { it.bankName == accName && it.type == "EXPENSE" }.sumOf { it.amount }
             val accBalance = baseBal + accIncome - accExpense
@@ -1200,7 +1347,7 @@ fun BudgetScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val lim = MathEvaluator.evaluate(newLimitText) ?: bItem.monthlyLimit
+                        val lim = LocalMathEvaluator.evaluate(newLimitText) ?: bItem.monthlyLimit
                         vm.updateBudget(bItem.category, lim)
                         editingBudgetItem = null
                     },
@@ -1250,7 +1397,7 @@ fun BudgetScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val amt = MathEvaluator.evaluate(repayAmount) ?: 0.0
+                        val amt = LocalMathEvaluator.evaluate(repayAmount) ?: 0.0
                         if (amt > 0) {
                             vm.recordCreditCardRepayment(amt, fromAccount)
                             showRepayDialog = false
@@ -1271,7 +1418,11 @@ fun BudgetScreen(
 }
 
 @Composable
-fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
+fun SettingsScreen(
+    transactions: List<TransactionEntity>,
+    vm: MainViewModel,
+    onClearAll: () -> Unit
+) {
     val context = LocalContext.current
     val userSampleMessages = listOf(
         "SB A/c *0007 Credited for Rs:8000.00",
@@ -1326,9 +1477,9 @@ fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         Button(
                             onClick = {
-                                val csvHeader = "Date,Account,Type,Category,SubCategory,Mode,Amount,Note\n"
+                                val csvHeader = "Date,Account,Type,Category,Mode,Amount,Note\n"
                                 val csvRows = transactions.joinToString("\n") {
-                                    "${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it.timestamp))},${it.bankName},${it.type},${it.category},${it.subCategory},${it.paymentMode},${it.amount},\"${it.merchantOrNote}\""
+                                    "${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it.timestamp))},${it.bankName},${it.type},${it.category},${it.paymentMode},${it.amount},\"${it.merchantOrNote}\""
                                 }
                                 val sendIntent = Intent(Intent.ACTION_SEND).apply {
                                     type = "text/csv"
@@ -1344,7 +1495,7 @@ fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
                         }
 
                         OutlinedButton(
-                            onClick = { vm.clearAllTransactions() },
+                            onClick = onClearAll,
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("Wipe All Data", color = DangerRed, fontWeight = FontWeight.Bold)
@@ -1401,8 +1552,8 @@ fun QuickAddTransactionSheet(
 ) {
     var amountExpr by remember { mutableStateOf("") }
     var type by remember { mutableStateOf("EXPENSE") }
-    var category by remember { mutableStateOf(CategoryCatalog.allCategories.first()) }
-    val subCategories = CategoryCatalog.getSubCategories(category)
+    var category by remember { mutableStateOf(LocalCategoryCatalog.allCategories.first()) }
+    val subCategories = LocalCategoryCatalog.getSubCategories(category)
     var subCategory by remember(category) { mutableStateOf(subCategories.first()) }
     var paymentMode by remember { mutableStateOf("UPI") }
     var selectedAccount by remember { mutableStateOf(USER_ACCOUNTS[0]) }
@@ -1463,7 +1614,7 @@ fun QuickAddTransactionSheet(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            CategoryCatalog.allCategories.forEach { cat ->
+            LocalCategoryCatalog.allCategories.forEach { cat ->
                 FilterChip(
                     selected = category == cat,
                     onClick = { category = cat },
@@ -1510,7 +1661,7 @@ fun QuickAddTransactionSheet(
 
         Button(
             onClick = {
-                val amt = MathEvaluator.evaluate(amountExpr) ?: 0.0
+                val amt = LocalMathEvaluator.evaluate(amountExpr) ?: 0.0
                 if (amt > 0) {
                     onSave(amt, type, category, subCategory, paymentMode, selectedAccount, note)
                 }
@@ -1518,7 +1669,7 @@ fun QuickAddTransactionSheet(
             colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black),
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
-            val preview = MathEvaluator.evaluate(amountExpr)
+            val preview = LocalMathEvaluator.evaluate(amountExpr)
             val btnLabel = if (preview != null && preview > 0) {
                 "Save Transaction (₹${String.format("%,.2f", preview)})"
             } else {
