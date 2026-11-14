@@ -11,9 +11,8 @@ data class ParsedSmsTransaction(
 object BankSmsParser {
 
     // Regex patterns covering major Indian banks (HDFC, SBI, ICICI, Axis, Kotak, Paytm, etc.)
-    // Easily extendable with custom user SMS templates!
     private val amountRegex = Regex(
-        pattern = "(?:Rs\.?|INR|₹)\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+        pattern = """(?:Rs\.?|INR|₹)\s*([0-9,]+(?:\.[0-9]{1,2})?)""",
         option = RegexOption.IGNORE_CASE
     )
 
@@ -21,7 +20,7 @@ object BankSmsParser {
     private val creditKeywords = listOf("credited", "received", "deposited", "added", "cr", "refund")
 
     private val merchantRegex = Regex(
-        pattern = "(?:at|to|vpa|info:?|towards|from)\s+([A-Za-z0-9@._\-\s]{2,25}?)(?:\s+on|\s+ref|\s+upi|\.|,|$)",
+        pattern = """(?:at|to|vpa|info:?|towards|from)\s+([A-Za-z0-9@._\-\s]{2,25}?)(?:\s+on|\s+ref|\s+upi|\.|,|$)""",
         option = RegexOption.IGNORE_CASE
     )
 
