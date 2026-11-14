@@ -29,6 +29,12 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBudget(budget: BudgetEntity)
 
+    @Query("SELECT * FROM account_balances")
+    fun getAllAccountBalances(): Flow<List<AccountBalanceEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAccountBalance(accountBalance: AccountBalanceEntity)
+
     @Query("SELECT SUM(amount) FROM transactions WHERE type = 'EXPENSE' AND (category = :category OR bankName = :category) AND isPendingApproval = 0")
     suspend fun getTotalSpentForCategory(category: String): Double?
 }
