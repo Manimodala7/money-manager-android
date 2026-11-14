@@ -9,7 +9,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-@Database(entities = [TransactionEntity::class, BudgetEntity::class], version = 3, exportSchema = false)
+@Database(
+    entities = [TransactionEntity::class, BudgetEntity::class, AccountBalanceEntity::class],
+    version = 4,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun appDao(): AppDao
 
@@ -28,11 +32,11 @@ abstract class AppDatabase : RoomDatabase() {
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)
-                        seedDefaultBudgetsOnly(context)
+                        seedDefaults(context)
                     }
                     override fun onDestructiveMigration(db: SupportSQLiteDatabase) {
                         super.onDestructiveMigration(db)
-                        seedDefaultBudgetsOnly(context)
+                        seedDefaults(context)
                     }
                 })
                 .build()
@@ -41,8 +45,7 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        // Seeds ONLY default monthly budget limits — 0 fake transactions!
-        private fun seedDefaultBudgetsOnly(context: Context) {
+        private fun seedDefaults(context: Context) {
             CoroutineScope(Dispatchers.IO).launch {
                 val dao = getDatabase(context).appDao()
                 dao.upsertBudget(BudgetEntity("Union Bank *0007", 25000.0))
@@ -56,6 +59,11 @@ abstract class AppDatabase : RoomDatabase() {
                 dao.upsertBudget(BudgetEntity("Transport & Fuel", 5000.0))
                 dao.upsertBudget(BudgetEntity("Bills & Utilities", 10000.0))
                 dao.upsertBudget(BudgetEntity("Investments", 15000.0))
+
+                // Initialize starting balances to 0.0 (User can edit Current Balance anytime!)
+                dao.upsertAccountBalance(AccountBalanceEntity("Union Bank *0007", 0.0))
+                dao.upsertAccountBalance(AccountBalanceEntity("ICICI Bank XX002", 0.0))
+                dao.upsertAccountBalance(AccountBalanceEntity("Slice xx9448", 0.0))
             }
         }
     }
