@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -38,10 +39,14 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.fintech.moneymanager.data.BudgetEntity
+import com.fintech.moneymanager.data.CategoryCatalog
 import com.fintech.moneymanager.data.TransactionEntity
 import com.fintech.moneymanager.notifications.DailyReminderWorker
 import com.fintech.moneymanager.notifications.NotificationHelper
 import com.fintech.moneymanager.ui.MainViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 val DarkBg = Color(0xFF0E1512)
@@ -49,6 +54,7 @@ val CardBg = Color(0xFF182420)
 val EmeraldGreen = Color(0xFF10B981)
 val EmeraldDark = Color(0xFF065F46)
 val SlateGray = Color(0xFF94A3B8)
+val DangerRed = Color(0xFFF43F5E)
 
 val USER_ACCOUNTS = listOf(
     "Union Bank *0007",
@@ -97,6 +103,7 @@ class MainActivity : ComponentActivity() {
 fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAddSheet by remember { mutableStateOf(false) }
+    var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
 
     val transactions by vm.transactions.collectAsState()
     val pendingSms by vm.pendingTransactions.collectAsState()
@@ -112,18 +119,34 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
         }
     }
 
-    // INSTANT POP-UP DIALOG FOR EVERY NEW AUTO-DETECTED SMS TRANSACTION
+    // 1. AUTO-DETECTED SMS TRANSACTION POP-UP DIALOG
     if (pendingSms.isNotEmpty()) {
         val currentPending = pendingSms.first()
         TransactionApprovalPopupDialog(
             item = currentPending,
             pendingCount = pendingSms.size,
-            onApprove = { cat, acc, note ->
-                vm.approvePendingTransaction(currentPending, cat, acc, note)
+            onApprove = { cat, subCat, acc, note ->
+                vm.approvePendingTransaction(currentPending, cat, subCat, acc, note)
             },
             onDismiss = {
                 vm.dismissPendingTransaction(currentPending)
             }
+        )
+    }
+
+    // 2. EDIT / DELETE EXISTING TRANSACTION DIALOG
+    editingTransaction?.let { txToEdit ->
+        EditTransactionDialog(
+            tx = txToEdit,
+            onSave = { updatedTx ->
+                vm.editTransaction(updatedTx)
+                editingTransaction = null
+            },
+            onDelete = {
+                vm.deleteTransaction(txToEdit)
+                editingTransaction = null
+            },
+            onDismiss = { editingTransaction = null }
         )
     }
 
@@ -173,10 +196,14 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             when (selectedTab) {
-                0 -> TransactionsScreen(transactions, pendingSms, vm)
+                0 -> TransactionsScreen(
+                    transactions = transactions,
+                    onEditClick = { editingTransaction = it },
+                    onDeleteClick = { vm.deleteTransaction(it) }
+                )
                 1 -> AnalyticsScreen(transactions)
                 2 -> BudgetScreen(transactions, budgets, vm)
-                3 -> SettingsScreen(vm)
+                3 -> SettingsScreen(transactions, vm)
             }
         }
 
@@ -186,8 +213,8 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
                 containerColor = CardBg
             ) {
                 QuickAddTransactionSheet(
-                    onSave = { amount, type, category, mode, account, note ->
-                        vm.addTransaction(amount, type, category, mode, account, note)
+                    onSave = { amount, type, category, subCategory, mode, account, note ->
+                        vm.addTransaction(amount, type, category, subCategory, mode, account, note)
                         showAddSheet = false
                     }
                 )
@@ -200,13 +227,16 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
 fun TransactionApprovalPopupDialog(
     item: TransactionEntity,
     pendingCount: Int,
-    onApprove: (String, String, String) -> Unit,
+    onApprove: (String, String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var selectedCat by remember(item.id) { mutableStateOf(if (item.type == "INCOME") "Salary" else "Food") }
+    var selectedCat by remember(item.id) { mutableStateOf(item.category.ifBlank { "Food & Dining" }) }
+    val subCatList = CategoryCatalog.getSubCategories(selectedCat)
+    var selectedSubCat by remember(item.id, selectedCat) {
+        mutableStateOf(if (item.subCategory in subCatList) item.subCategory else subCatList.first())
+    }
     var selectedAcc by remember(item.id) { mutableStateOf(item.bankName) }
     var note by remember(item.id) { mutableStateOf(item.merchantOrNote) }
-    val categories = listOf("Food", "Bills", "Shopping", "Transport", "Investment", "Salary", "Transfer")
 
     AlertDialog(
         onDismissRequest = { },
@@ -218,26 +248,29 @@ fun TransactionApprovalPopupDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("New Transaction Detected!", color = EmeraldGreen, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("Auto-Detected SMS!", color = EmeraldGreen, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     if (pendingCount > 1) {
                         Text("1 of $pendingCount", color = SlateGray, fontSize = 12.sp)
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 val sign = if (item.type == "INCOME") "+" else "-"
-                val amtColor = if (item.type == "INCOME") EmeraldGreen else Color(0xFFF87171)
+                val amtColor = if (item.type == "INCOME") EmeraldGreen else DangerRed
                 Text("$sign₹${String.format("%,.2f", item.amount)}", color = amtColor, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 item.rawSms?.let {
                     Surface(color = DarkBg, shape = RoundedCornerShape(8.dp)) {
                         Text(it, color = SlateGray, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
                     }
                 }
 
-                Text("Account Detected:", color = SlateGray, fontSize = 12.sp)
+                Text("Account:", color = SlateGray, fontSize = 12.sp)
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -251,16 +284,148 @@ fun TransactionApprovalPopupDialog(
                     }
                 }
 
-                Text("Select Category:", color = SlateGray, fontSize = 12.sp)
+                Text("Main Category (16):", color = SlateGray, fontSize = 12.sp)
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    categories.forEach { cat ->
+                    CategoryCatalog.allCategories.forEach { cat ->
                         FilterChip(
                             selected = selectedCat == cat,
                             onClick = { selectedCat = cat },
                             label = { Text(cat, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Text("Sub-Category ($selectedCat):", color = EmeraldGreen, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    subCatList.forEach { sub ->
+                        FilterChip(
+                            selected = selectedSubCat == sub,
+                            onClick = { selectedSubCat = sub },
+                            label = { Text(sub, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("Merchant / Note") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onApprove(selectedCat, selectedSubCat, selectedAcc, note) },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black)
+            ) {
+                Text("Save Transaction", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Dismiss", color = SlateGray)
+            }
+        }
+    )
+}
+
+@Composable
+fun EditTransactionDialog(
+    tx: TransactionEntity,
+    onSave: (TransactionEntity) -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var amountText by remember { mutableStateOf(tx.amount.toString()) }
+    var type by remember { mutableStateOf(tx.type) }
+    var selectedAcc by remember { mutableStateOf(tx.bankName) }
+    var selectedCat by remember { mutableStateOf(tx.category) }
+    val subCatList = CategoryCatalog.getSubCategories(selectedCat)
+    var selectedSubCat by remember(selectedCat) {
+        mutableStateOf(if (tx.subCategory in subCatList) tx.subCategory else subCatList.first())
+    }
+    var paymentMode by remember { mutableStateOf(tx.paymentMode) }
+    var note by remember { mutableStateOf(tx.merchantOrNote) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CardBg,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Edit Transaction", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = DangerRed)
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FilterChip(selected = type == "EXPENSE", onClick = { type = "EXPENSE" }, label = { Text("Expense") })
+                    FilterChip(selected = type == "INCOME", onClick = { type = "INCOME" }, label = { Text("Income") })
+                }
+
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it },
+                    label = { Text("Amount (₹)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Account:", color = SlateGray, fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    USER_ACCOUNTS.forEach { acc ->
+                        FilterChip(
+                            selected = selectedAcc == acc,
+                            onClick = { selectedAcc = acc },
+                            label = { Text(acc, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Text("Category:", color = SlateGray, fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CategoryCatalog.allCategories.forEach { cat ->
+                        FilterChip(
+                            selected = selectedCat == cat,
+                            onClick = { selectedCat = cat },
+                            label = { Text(cat, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Text("Sub-Category:", color = EmeraldGreen, fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    subCatList.forEach { sub ->
+                        FilterChip(
+                            selected = selectedSubCat == sub,
+                            onClick = { selectedSubCat = sub },
+                            label = { Text(sub, fontSize = 11.sp) }
                         )
                     }
                 }
@@ -276,15 +441,28 @@ fun TransactionApprovalPopupDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onApprove(selectedCat, selectedAcc, note) },
+                onClick = {
+                    val newAmt = amountText.toDoubleOrNull() ?: tx.amount
+                    onSave(
+                        tx.copy(
+                            amount = newAmt,
+                            type = type,
+                            bankName = selectedAcc,
+                            category = selectedCat,
+                            subCategory = selectedSubCat,
+                            paymentMode = paymentMode,
+                            merchantOrNote = note
+                        )
+                    )
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black)
             ) {
-                Text("Approve & Save", fontWeight = FontWeight.Bold)
+                Text("Save Changes", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             OutlinedButton(onClick = onDismiss) {
-                Text("Ignore", color = SlateGray)
+                Text("Cancel", color = SlateGray)
             }
         }
     )
@@ -308,32 +486,57 @@ fun BottomNavItem(label: String, icon: androidx.compose.ui.graphics.vector.Image
 @Composable
 fun TransactionsScreen(
     transactions: List<TransactionEntity>,
-    pendingSms: List<TransactionEntity>,
-    vm: MainViewModel
+    onEditClick: (TransactionEntity) -> Unit,
+    onDeleteClick: (TransactionEntity) -> Unit
 ) {
     var selectedAccountFilter by remember { mutableStateOf("All Accounts") }
-    val filteredTx = if (selectedAccountFilter == "All Accounts") {
-        transactions
-    } else {
-        transactions.filter { it.bankName == selectedAccountFilter }
+    var searchQuery by remember { mutableStateOf("") }
+
+    val filteredTx = transactions.filter { tx ->
+        val matchesAcc = selectedAccountFilter == "All Accounts" || tx.bankName == selectedAccountFilter
+        val matchesSearch = searchQuery.isBlank() ||
+            tx.merchantOrNote.contains(searchQuery, true) ||
+            tx.category.contains(searchQuery, true) ||
+            tx.subCategory.contains(searchQuery, true) ||
+            tx.amount.toString().contains(searchQuery)
+        matchesAcc && matchesSearch
     }
 
-    val totalIncome = filteredTx.filter { it.type == "INCOME" && it.category != "CC Bill Repayment" }.sumOf { it.amount }
-    val totalExpense = filteredTx.filter { it.type == "EXPENSE" }.sumOf { it.amount }
+    val totalIncome = filteredTx.filter { it.type == "INCOME" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
+    val totalExpense = filteredTx.filter { it.type == "EXPENSE" && it.subCategory != "CC Bill Repayment" }.sumOf { it.amount }
     val balance = totalIncome - totalExpense
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             Spacer(modifier = Modifier.height(12.dp))
-            Text("Money Manager", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(EmeraldDark),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("₹", color = EmeraldGreen, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("Money Manager", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                }
+                Text("${filteredTx.size} items", color = SlateGray, fontSize = 12.sp)
+            }
         }
 
-        // Account Filter Bar
+        // Account Filter Chips
         item {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -375,12 +578,65 @@ fun TransactionsScreen(
             }
         }
 
+        // Search Bar
         item {
-            Text("Transaction History", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search Zomato, Swiggy, UPI, amount...", color = SlateGray, fontSize = 13.sp) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = EmeraldGreen) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear", tint = SlateGray)
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
-        items(filteredTx) { tx ->
-            TransactionRow(tx)
+        item {
+            Text(
+                "Transaction History (Tap any item to Edit/Delete)",
+                color = SlateGray,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+        }
+
+        if (filteredTx.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = CardBg),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(28.dp).fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(Icons.Default.ReceiptLong, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(40.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("No Transactions Yet", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(
+                            "Tap the center '+' button to log an expense, or receive a Bank SMS / test in Settings!",
+                            color = SlateGray,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        } else {
+            items(filteredTx, key = { it.id }) { tx ->
+                TransactionRow(
+                    tx = tx,
+                    onEdit = { onEditClick(tx) },
+                    onDelete = { onDeleteClick(tx) }
+                )
+            }
         }
 
         item { Spacer(modifier = Modifier.height(24.dp)) }
@@ -388,39 +644,81 @@ fun TransactionsScreen(
 }
 
 @Composable
-fun TransactionRow(tx: TransactionEntity) {
+fun TransactionRow(
+    tx: TransactionEntity,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val dateStr = remember(tx.timestamp) {
+        SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(tx.timestamp))
+    }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = CardBg),
         shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onEdit() }
     ) {
         Row(
-            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            modifier = Modifier.padding(14.dp).fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(color = EmeraldDark, shape = RoundedCornerShape(6.dp)) {
+                        Text(
+                            tx.subCategory,
+                            color = EmeraldGreen,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Text(tx.category, color = SlateGray, fontSize = 11.sp)
+                }
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(tx.merchantOrNote, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Text("${tx.bankName} • ${tx.category} • ${tx.paymentMode}", color = SlateGray, fontSize = 12.sp)
+                Text("${tx.bankName} • ${tx.paymentMode} • $dateStr", color = SlateGray, fontSize = 11.sp)
             }
-            val sign = if (tx.type == "INCOME") "+" else "-"
-            val color = if (tx.type == "INCOME") EmeraldGreen else Color.White
-            Text("$sign₹${String.format("%,.2f", tx.amount)}", color = color, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+
+            Column(horizontalAlignment = Alignment.End) {
+                val sign = if (tx.type == "INCOME") "+" else "-"
+                val color = if (tx.type == "INCOME") EmeraldGreen else Color.White
+                Text("$sign₹${String.format("%,.2f", tx.amount)}", color = color, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+
+                Row {
+                    IconButton(onClick = onEdit, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit", tint = SlateGray, modifier = Modifier.size(16.dp))
+                    }
+                    IconButton(onClick = onDelete, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = DangerRed.copy(alpha = 0.8f), modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
 fun AnalyticsScreen(transactions: List<TransactionEntity>) {
-    val expenses = transactions.filter { it.type == "EXPENSE" && it.category != "CC Bill Repayment" }
+    val expenses = transactions.filter { it.type == "EXPENSE" && it.subCategory != "CC Bill Repayment" }
     val totalSpend = expenses.sumOf { it.amount }.coerceAtLeast(1.0)
-    val byAccount = expenses.groupBy { it.bankName }.mapValues { it.value.sumOf { tx -> tx.amount } }
     val byCategory = expenses.groupBy { it.category }.mapValues { it.value.sumOf { tx -> tx.amount } }
-    val chartColors = listOf(EmeraldGreen, Color(0xFF38BDF8), Color(0xFFF59E0B), Color(0xFFA855F7), Color(0xFFF43F5E))
+        .entries.sortedByDescending { it.value }
+    val bySubCategory = expenses.groupBy { "${it.subCategory} (${it.category})" }.mapValues { it.value.sumOf { tx -> tx.amount } }
+        .entries.sortedByDescending { it.value }
+    val byAccount = expenses.groupBy { it.bankName }.mapValues { it.value.sumOf { tx -> tx.amount } }
+
+    val chartColors = listOf(
+        EmeraldGreen, Color(0xFF38BDF8), Color(0xFFF59E0B),
+        Color(0xFFA855F7), Color(0xFFF43F5E), Color(0xFFEC4899), Color(0xFF14B8A6)
+    )
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
             Text("Spending Analytics", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -439,16 +737,26 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(190.dp)) {
                         Canvas(modifier = Modifier.size(170.dp)) {
                             var startAngle = -90f
-                            byCategory.entries.forEachIndexed { idx, entry ->
-                                val sweep = ((entry.value / totalSpend) * 360f).toFloat()
+                            if (byCategory.isEmpty()) {
                                 drawArc(
-                                    color = chartColors[idx % chartColors.size],
-                                    startAngle = startAngle,
-                                    sweepAngle = sweep,
+                                    color = SlateGray.copy(alpha = 0.2f),
+                                    startAngle = 0f,
+                                    sweepAngle = 360f,
                                     useCenter = false,
-                                    style = Stroke(width = 34f, cap = StrokeCap.Round)
+                                    style = Stroke(width = 34f)
                                 )
-                                startAngle += sweep
+                            } else {
+                                byCategory.forEachIndexed { idx, entry ->
+                                    val sweep = ((entry.value / totalSpend) * 360f).toFloat()
+                                    drawArc(
+                                        color = chartColors[idx % chartColors.size],
+                                        startAngle = startAngle,
+                                        sweepAngle = sweep,
+                                        useCenter = false,
+                                        style = Stroke(width = 34f, cap = StrokeCap.Round)
+                                    )
+                                    startAngle += sweep
+                                }
                             }
                         }
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -461,7 +769,28 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
         }
 
         item {
-            Text("Spend by Account", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("Sub-Category Breakdown (Zomato, Swiggy, etc.)", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+
+        items(bySubCategory) { entry ->
+            val pct = ((entry.value / totalSpend) * 100).toInt()
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(entry.key, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("₹${String.format("%,.2f", entry.value)} ($pct%)", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+
+        item {
+            Text("Spend by Bank Account", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
 
         items(byAccount.entries.toList()) { entry ->
@@ -471,35 +800,16 @@ fun AnalyticsScreen(transactions: List<TransactionEntity>) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    modifier = Modifier.padding(14.dp).fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(entry.key, color = Color.White, fontWeight = FontWeight.SemiBold)
-                    Text("₹${String.format("%,.2f", entry.value)}", color = EmeraldGreen, fontWeight = FontWeight.Bold)
+                    Text("₹${String.format("%,.2f", entry.value)}", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        item {
-            Text("Spend by Category", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
-
-        items(byCategory.entries.toList()) { entry ->
-            val pct = ((entry.value / totalSpend) * 100).toInt()
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CardBg),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(entry.key, color = Color.White, fontWeight = FontWeight.SemiBold)
-                    Text("₹${String.format("%,.2f", entry.value)} ($pct%)", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
 
@@ -510,8 +820,8 @@ fun BudgetScreen(
     vm: MainViewModel
 ) {
     var showRepayDialog by remember { mutableStateOf(false) }
+    var editingBudgetItem by remember { mutableStateOf<BudgetEntity?>(null) }
 
-    // Calculate Credit Card xx1009 Due
     val ccSpent = transactions.filter { it.bankName == "Credit Card xx1009" && it.type == "EXPENSE" }.sumOf { it.amount }
     val ccRepaid = transactions.filter { it.bankName == "Credit Card xx1009" && it.type == "INCOME" }.sumOf { it.amount }
     val ccOutstanding = (ccSpent - ccRepaid).coerceAtLeast(0.0)
@@ -522,7 +832,7 @@ fun BudgetScreen(
     ) {
         item {
             Text("Accounts & Budgets", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Separate account balances, credit card repayment & limits", color = SlateGray, fontSize = 13.sp)
+            Text("Tap any budget card to edit its monthly limit", color = SlateGray, fontSize = 12.sp)
         }
 
         // CREDIT CARD xx1009 REPAYMENT CARD
@@ -547,28 +857,29 @@ fun BudgetScreen(
                     ) {
                         Icon(Icons.Default.Payment, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Pay Credit Card Bill (Repayment)", fontWeight = FontWeight.Bold)
+                        Text("Pay Credit Card Bill (From Bank A/c)", fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
-        // SEPARATE BANK ACCOUNT BALANCES & SPENDING
         item {
-            Text("Bank Account Operations", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("Bank Account Balances & Limits", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
 
         items(BANK_ACCOUNTS_ONLY) { accName ->
             val accIncome = transactions.filter { it.bankName == accName && it.type == "INCOME" }.sumOf { it.amount }
             val accExpense = transactions.filter { it.bankName == accName && it.type == "EXPENSE" }.sumOf { it.amount }
             val accBalance = accIncome - accExpense
-            val accBudget = budgets.find { it.category == accName }?.monthlyLimit ?: 20000.0
-            val progress = (accExpense / accBudget).toFloat().coerceIn(0f, 1f)
+            val accBudgetObj = budgets.find { it.category == accName } ?: BudgetEntity(accName, 20000.0)
+            val progress = (accExpense / accBudgetObj.monthlyLimit).toFloat().coerceIn(0f, 1f)
 
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { editingBudgetItem = accBudgetObj }
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -577,14 +888,14 @@ fun BudgetScreen(
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "In: +₹${accIncome.toInt()}  |  Out: -₹${accExpense.toInt()} (Limit: ₹${accBudget.toInt()})",
+                        "In: +₹${accIncome.toInt()}  |  Out: -₹${accExpense.toInt()} (Limit: ₹${accBudgetObj.monthlyLimit.toInt()}) ✎",
                         color = SlateGray,
                         fontSize = 12.sp
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
                         progress = { progress },
-                        color = if (progress >= 0.8f) Color(0xFFF43F5E) else EmeraldGreen,
+                        color = if (progress >= 0.8f) DangerRed else EmeraldGreen,
                         trackColor = DarkBg,
                         modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
                     )
@@ -600,17 +911,19 @@ fun BudgetScreen(
         items(categoryBudgets) { budget ->
             val spent = transactions.filter { it.type == "EXPENSE" && it.category.equals(budget.category, true) }.sumOf { it.amount }
             val progress = (spent / budget.monthlyLimit).toFloat().coerceIn(0f, 1f)
-            val barColor = if (progress >= 0.8f) Color(0xFFF43F5E) else EmeraldGreen
+            val barColor = if (progress >= 0.8f) DangerRed else EmeraldGreen
 
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { editingBudgetItem = budget }
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(budget.category, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Text("₹${spent.toInt()} / ₹${budget.monthlyLimit.toInt()}", color = SlateGray, fontSize = 13.sp)
+                        Text("₹${spent.toInt()} / ₹${budget.monthlyLimit.toInt()} ✎", color = SlateGray, fontSize = 13.sp)
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
@@ -624,6 +937,41 @@ fun BudgetScreen(
         }
 
         item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+
+    editingBudgetItem?.let { bItem ->
+        var newLimitText by remember(bItem) { mutableStateOf(bItem.monthlyLimit.toInt().toString()) }
+        AlertDialog(
+            onDismissRequest = { editingBudgetItem = null },
+            containerColor = CardBg,
+            title = { Text("Edit Monthly Limit: ${bItem.category}", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = newLimitText,
+                    onValueChange = { newLimitText = it },
+                    label = { Text("Monthly Limit (₹)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val lim = newLimitText.toDoubleOrNull() ?: bItem.monthlyLimit
+                        vm.updateBudget(bItem.category, lim)
+                        editingBudgetItem = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black)
+                ) {
+                    Text("Save Limit", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { editingBudgetItem = null }) {
+                    Text("Cancel", color = SlateGray)
+                }
+            }
+        )
     }
 
     if (showRepayDialog) {
@@ -681,17 +1029,17 @@ fun BudgetScreen(
 }
 
 @Composable
-fun SettingsScreen(vm: MainViewModel) {
+fun SettingsScreen(transactions: List<TransactionEntity>, vm: MainViewModel) {
     val context = LocalContext.current
     val userSampleMessages = listOf(
         "SB A/c *0007 Credited for Rs:8000.00",
         "Union Bank of India A/c*0007 Dr Rs5926.00",
-        "Union Bank of India A/c *0007 Debited Rs:335.00 on 30-10-2026",
+        "Union Bank of India A/c *0007 Debited Rs:335.00 on 30-10-2026 to Swiggy",
         "ICICI Bank Acct XX002 debited for Rs 9445.00 on 30-Oct-26",
         "Dear Customer, Acct XX002 is credited with Rs 450.00 on 25-Oct-26 from",
-        "Rs. 3,015.85 spent on your credit card xx1009",
+        "Rs. 3,015.85 spent on your credit card xx1009 at Amazon",
         "Rs. 18,000 received in slice A/c xx9448 on 20-Oct-26 from",
-        "Rs. 3,740 sent from a/c xx9448 on 22-Oct-26 to"
+        "Rs. 3,740 sent from a/c xx9448 on 22-Oct-26 to Zomato"
     )
     var sampleSms by remember { mutableStateOf(userSampleMessages[0]) }
 
@@ -700,7 +1048,7 @@ fun SettingsScreen(vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Settings & Live SMS Tester", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("Settings & Tools", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
 
         item {
@@ -725,6 +1073,7 @@ fun SettingsScreen(vm: MainViewModel) {
             }
         }
 
+        // Export & Reset Data Card
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardBg),
@@ -732,9 +1081,46 @@ fun SettingsScreen(vm: MainViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("2. Test Your Exact Bank Messages", color = EmeraldGreen, fontWeight = FontWeight.Bold)
-                    Text("Tap any of your bank messages below to test the Pop-Up & Account Parser:", color = SlateGray, fontSize = 12.sp)
+                    Text("2. Export Statement or Clear Data", color = EmeraldGreen, fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = {
+                                val csvHeader = "Date,Account,Type,Category,SubCategory,Mode,Amount,Note\n"
+                                val csvRows = transactions.joinToString("\n") {
+                                    "${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it.timestamp))},${it.bankName},${it.type},${it.category},${it.subCategory},${it.paymentMode},${it.amount},\"${it.merchantOrNote}\""
+                                }
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/csv"
+                                    putExtra(Intent.EXTRA_SUBJECT, "Money Manager Statement")
+                                    putExtra(Intent.EXTRA_TEXT, csvHeader + csvRows)
+                                }
+                                context.startActivity(Intent.createChooser(sendIntent, "Export CSV Statement"))
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark, contentColor = Color.White),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Export CSV", fontWeight = FontWeight.Bold)
+                        }
 
+                        OutlinedButton(
+                            onClick = { vm.clearAllTransactions() },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Wipe All Data", color = DangerRed, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("3. Test Your Bank Messages", color = EmeraldGreen, fontWeight = FontWeight.Bold)
                     userSampleMessages.forEach { msg ->
                         Surface(
                             color = DarkBg,
@@ -770,37 +1156,53 @@ fun SettingsScreen(vm: MainViewModel) {
 
 @Composable
 fun QuickAddTransactionSheet(
-    onSave: (Double, String, String, String, String, String) -> Unit
+    onSave: (Double, String, String, String, String, String, String) -> Unit
 ) {
     var amountText by remember { mutableStateOf("") }
     var type by remember { mutableStateOf("EXPENSE") }
-    var category by remember { mutableStateOf("Food") }
+    var category by remember { mutableStateOf(CategoryCatalog.allCategories.first()) }
+    val subCategories = CategoryCatalog.getSubCategories(category)
+    var subCategory by remember(category) { mutableStateOf(subCategories.first()) }
     var paymentMode by remember { mutableStateOf("UPI") }
     var selectedAccount by remember { mutableStateOf(USER_ACCOUNTS[0]) }
     var note by remember { mutableStateOf("") }
 
-    val categories = listOf("Food", "Bills", "Shopping", "Transport", "Investment", "Salary")
     val modes = listOf("UPI", "Credit Card", "Cash", "Bank Transfer")
 
     Column(
-        modifier = Modifier.fillMaxWidth().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text("Quick Add Transaction", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilterChip(selected = type == "EXPENSE", onClick = { type = "EXPENSE" }, label = { Text("Expense") })
-            FilterChip(selected = type == "INCOME", onClick = { type = "INCOME" }, label = { Text("Income") })
+            FilterChip(
+                selected = type == "EXPENSE",
+                onClick = { type = "EXPENSE" },
+                label = { Text("Expense") }
+            )
+            FilterChip(
+                selected = type == "INCOME",
+                onClick = {
+                    type = "INCOME"
+                    category = "Income / Credits"
+                },
+                label = { Text("Income") }
+            )
         }
 
         OutlinedTextField(
             value = amountText,
             onValueChange = { amountText = it },
             label = { Text("Amount (₹)") },
+            singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
 
-        Text("Select Account", color = SlateGray, fontSize = 13.sp)
+        Text("Select Account", color = SlateGray, fontSize = 12.sp)
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -817,30 +1219,53 @@ fun QuickAddTransactionSheet(
             }
         }
 
-        Text("Category", color = SlateGray, fontSize = 13.sp)
+        Text("Main Category (Swipe for 16 Categories)", color = SlateGray, fontSize = 12.sp)
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            categories.forEach { cat ->
-                FilterChip(selected = category == cat, onClick = { category = cat }, label = { Text(cat, fontSize = 12.sp) })
+            CategoryCatalog.allCategories.forEach { cat ->
+                FilterChip(
+                    selected = category == cat,
+                    onClick = { category = cat },
+                    label = { Text(cat, fontSize = 12.sp) }
+                )
             }
         }
 
-        Text("Payment Mode", color = SlateGray, fontSize = 13.sp)
+        Text("Sub-Category ($category)", color = EmeraldGreen, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            subCategories.forEach { sub ->
+                FilterChip(
+                    selected = subCategory == sub,
+                    onClick = { subCategory = sub },
+                    label = { Text(sub, fontSize = 12.sp) }
+                )
+            }
+        }
+
+        Text("Payment Mode", color = SlateGray, fontSize = 12.sp)
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             modes.forEach { mode ->
-                FilterChip(selected = paymentMode == mode, onClick = { paymentMode = mode }, label = { Text(mode, fontSize = 12.sp) })
+                FilterChip(
+                    selected = paymentMode == mode,
+                    onClick = { paymentMode = mode },
+                    label = { Text(mode, fontSize = 12.sp) }
+                )
             }
         }
 
         OutlinedTextField(
             value = note,
             onValueChange = { note = it },
-            label = { Text("Merchant / Note") },
+            label = { Text("Merchant / Note (Optional)") },
+            singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -848,7 +1273,7 @@ fun QuickAddTransactionSheet(
             onClick = {
                 val amt = amountText.toDoubleOrNull() ?: 0.0
                 if (amt > 0) {
-                    onSave(amt, type, category, paymentMode, selectedAccount, note)
+                    onSave(amt, type, category, subCategory, paymentMode, selectedAccount, note)
                 }
             },
             colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black),
