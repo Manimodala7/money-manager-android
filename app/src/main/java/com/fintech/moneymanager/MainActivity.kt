@@ -88,15 +88,10 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { }
 
-    LaunchedEffect(Unit) {
-        val perms = mutableListOf(
-            Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_SMS
-        )
+   LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
         }
-        permissionLauncher.launch(perms.toTypedArray())
     }
 
     Scaffold(
