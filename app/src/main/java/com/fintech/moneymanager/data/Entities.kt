@@ -24,6 +24,61 @@ data class BudgetEntity(
     val monthlyLimit: Double
 )
 
+@Entity(tableName = "account_balances")
+data class AccountBalanceEntity(
+    @PrimaryKey val accountName: String,
+    val baseBalance: Double // Automatically adjusted when you set your Current Balance
+)
+
+// Built-in Calculator Engine for Amount Fields (supports +, -, *, /)
+object MathEvaluator {
+    fun evaluate(expression: String): Double? {
+        val clean = expression.replace(",", "").replace("₹", "").replace(" ", "")
+        if (clean.isEmpty()) return null
+        return try {
+            val tokens = Regex("""(?=[+\-*/])|(?<=[+\-*/])""").split(clean).filter { it.isNotEmpty() }
+            if (tokens.isEmpty()) return null
+
+            val values = mutableListOf<Double>()
+            val ops = mutableListOf<String>()
+
+            var i = 0
+            while (i < tokens.size) {
+                val t = tokens[i]
+                if ((t == "+" || t == "-") && (i == 0 || tokens[i - 1] in listOf("+", "-", "*", "/"))) {
+                    val nextVal = tokens.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
+                    values.add(if (t == "-") -nextVal else nextVal)
+                    i += 2
+                } else if (t in listOf("+", "-", "*", "/")) {
+                    ops.add(t)
+                    i++
+                } else {
+                    val v = t.toDoubleOrNull() ?: return null
+                    if (ops.isNotEmpty() && (ops.last() == "*" || ops.last() == "/")) {
+                        val op = ops.removeAt(ops.lastIndex)
+                        val prev = values.removeAt(values.lastIndex)
+                        values.add(if (op == "*") prev * v else if (v != 0.0) prev / v else 0.0)
+                    } else {
+                        values.add(v)
+                    }
+                    i++
+                }
+            }
+
+            var result = values.firstOrNull() ?: return null
+            var opIdx = 0
+            for (vIdx in 1 until values.size) {
+                val op = ops.getOrNull(opIdx++) ?: break
+                if (op == "+") result += values[vIdx]
+                else if (op == "-") result -= values[vIdx]
+            }
+            result
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
+
 object CategoryCatalog {
     val map: Map<String, List<String>> = linkedMapOf(
         "Food & Dining" to listOf("Zomato", "Swiggy", "Dineout", "Order", "Bought", "Cafe & Tea", "Street Food", "Snacks"),
@@ -50,7 +105,6 @@ object CategoryCatalog {
         return map[category] ?: listOf("General", "Order", "Bought", "Online", "Offline")
     }
 
-    // Smartly guesses Category & SubCategory from SMS or Merchant text
     fun autoDetectCategory(text: String, type: String): Pair<String, String> {
         if (type == "INCOME") return "Income / Credits" to "Salary"
         val lower = text.lowercase()
