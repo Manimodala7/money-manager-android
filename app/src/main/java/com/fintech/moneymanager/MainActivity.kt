@@ -1,6 +1,8 @@
 package com.fintech.moneymanager
 
 import android.Manifest
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -28,6 +30,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -48,14 +51,16 @@ import com.fintech.moneymanager.ui.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-val DarkBg = Color(0xFF0E1512)
-val CardBg = Color(0xFF182420)
+val DarkBg = Color(0xFF0B110E)
+val CardBg = Color(0xFF15201B)
+val CardElevated = Color(0xFF1E2E27)
 val EmeraldGreen = Color(0xFF10B981)
-val EmeraldDark = Color(0xFF065F46)
+val EmeraldDark = Color(0xFF064E3B)
 val SlateGray = Color(0xFF94A3B8)
 val DangerRed = Color(0xFFF43F5E)
 
@@ -72,7 +77,6 @@ val BANK_ACCOUNTS_ONLY = listOf(
     "Slice xx9448"
 )
 
-// Self-contained Calculator Engine (supports +, -, *, /)
 object LocalMathEvaluator {
     fun evaluate(expression: String): Double? {
         val clean = expression.replace(",", "").replace("₹", "").replace(" ", "")
@@ -136,7 +140,6 @@ object LocalMathEvaluator {
     }
 }
 
-// Self-contained 16 Categories & 85+ Sub-Categories Catalog
 object LocalCategoryCatalog {
     val map: Map<String, List<String>> = linkedMapOf(
         "Food & Dining" to listOf("Zomato", "Swiggy", "Dineout", "Order", "Bought", "Cafe & Tea", "Street Food", "Snacks"),
@@ -170,6 +173,9 @@ class MainActivity : ComponentActivity() {
         NotificationHelper.createChannels(this)
         scheduleDailyReminder()
 
+        val openFromWidget = intent?.getBooleanExtra("OPEN_QUICK_ADD", false) ?: false
+        val widgetCategory = intent?.getStringExtra("PRESET_CATEGORY") ?: "Food & Dining"
+
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -178,7 +184,10 @@ class MainActivity : ComponentActivity() {
                     surface = CardBg
                 )
             ) {
-                MoneyManagerApp()
+                MoneyManagerApp(
+                    initialOpenQuickAdd = openFromWidget,
+                    initialPresetCategory = widgetCategory
+                )
             }
         }
     }
@@ -190,6 +199,83 @@ class MainActivity : ComponentActivity() {
             ExistingPeriodicWorkPolicy.KEEP,
             workRequest
         )
+    }
+}
+
+// Reusable Interactive Calendar Date + HH:mm Time Picker Selector
+@Composable
+fun DateTimePickerRow(
+    timestampMillis: Long,
+    onTimestampChange: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    val dateFormat = remember { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
+    val timeFormat = remember { SimpleDateFormat("HH:mm (hh:mm a)", Locale.getDefault()) }
+
+    val formattedDate = remember(timestampMillis) { dateFormat.format(Date(timestampMillis)) }
+    val formattedTime = remember(timestampMillis) { timeFormat.format(Date(timestampMillis)) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Transaction Date & Time (Calendar & HH:mm)", color = SlateGray, fontSize = 12.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Calendar Date Button
+            OutlinedButton(
+                onClick = {
+                    val cal = Calendar.getInstance().apply { timeInMillis = timestampMillis }
+                    DatePickerDialog(
+                        context,
+                        { _, year, month, dayOfMonth ->
+                            val updatedCal = Calendar.getInstance().apply {
+                                timeInMillis = timestampMillis
+                                set(Calendar.YEAR, year)
+                                set(Calendar.MONTH, month)
+                                set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                            }
+                            onTimestampChange(updatedCal.timeInMillis)
+                        },
+                        cal.get(Calendar.YEAR),
+                        cal.get(Calendar.MONTH),
+                        cal.get(Calendar.DAY_OF_MONTH)
+                    ).show()
+                },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.CalendarToday, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(formattedDate, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            // HH:mm Time Picker Button
+            OutlinedButton(
+                onClick = {
+                    val cal = Calendar.getInstance().apply { timeInMillis = timestampMillis }
+                    TimePickerDialog(
+                        context,
+                        { _, hourOfDay, minute ->
+                            val updatedCal = Calendar.getInstance().apply {
+                                timeInMillis = timestampMillis
+                                set(Calendar.HOUR_OF_DAY, hourOfDay)
+                                set(Calendar.MINUTE, minute)
+                            }
+                            onTimestampChange(updatedCal.timeInMillis)
+                        },
+                        cal.get(Calendar.HOUR_OF_DAY),
+                        cal.get(Calendar.MINUTE),
+                        true // 24-hour HH:mm format enabled
+                    ).show()
+                },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Schedule, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(formattedTime, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -225,6 +311,7 @@ fun CalculatorAmountField(
                 }
             },
             singleLine = true,
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -272,17 +359,21 @@ fun CalculatorAmountField(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
+fun MoneyManagerApp(
+    initialOpenQuickAdd: Boolean = false,
+    initialPresetCategory: String = "Food & Dining",
+    vm: MainViewModel = viewModel()
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val dao = remember { AppDatabase.getDatabase(context).appDao() }
     val prefs = remember { context.getSharedPreferences("money_manager_balances", Context.MODE_PRIVATE) }
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    var showAddSheet by remember { mutableStateOf(false) }
+    var showAddSheet by remember { mutableStateOf(initialOpenQuickAdd) }
+    var presetCategory by remember { mutableStateOf(initialPresetCategory) }
     var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
 
-    // Reactive map of base balances per bank account stored in SharedPreferences
     var baseBalances by remember {
         mutableStateOf(
             BANK_ACCOUNTS_ONLY.associateWith { acc ->
@@ -320,7 +411,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
         TransactionApprovalPopupDialog(
             item = currentPending,
             pendingCount = pendingSms.size,
-            onApprove = { cat, subCat, acc, note ->
+            onApprove = { cat, subCat, acc, note, chosenTimestamp ->
                 val finalNote = if (note.startsWith("[")) note else "[$subCat] $note"
                 scope.launch(Dispatchers.IO) {
                     dao.updateTransaction(
@@ -328,6 +419,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
                             category = cat,
                             bankName = acc,
                             merchantOrNote = finalNote,
+                            timestamp = chosenTimestamp,
                             isPendingApproval = false
                         )
                     )
@@ -339,7 +431,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
         )
     }
 
-    // 2. EDIT / DELETE EXISTING TRANSACTION DIALOG
+    // 2. EDIT / DELETE EXISTING TRANSACTION DIALOG (with Date & HH:mm Picker)
     editingTransaction?.let { txToEdit ->
         EditTransactionDialog(
             tx = txToEdit,
@@ -390,7 +482,10 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
                 }
 
                 FloatingActionButton(
-                    onClick = { showAddSheet = true },
+                    onClick = {
+                        presetCategory = "Food & Dining"
+                        showAddSheet = true
+                    },
                     containerColor = EmeraldGreen,
                     contentColor = Color.Black,
                     shape = CircleShape,
@@ -440,7 +535,8 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
                 containerColor = CardBg
             ) {
                 QuickAddTransactionSheet(
-                    onSave = { amount, type, category, subCategory, mode, account, note ->
+                    initialCategory = presetCategory,
+                    onSave = { amount, type, category, subCategory, mode, account, note, chosenTimestamp ->
                         val formattedNote = if (note.isBlank()) "[$subCategory] $category" else "[$subCategory] $note"
                         scope.launch(Dispatchers.IO) {
                             dao.insertTransaction(
@@ -451,6 +547,7 @@ fun MoneyManagerApp(vm: MainViewModel = viewModel()) {
                                     paymentMode = mode,
                                     merchantOrNote = formattedNote,
                                     bankName = account,
+                                    timestamp = chosenTimestamp,
                                     isPendingApproval = false
                                 )
                             )
@@ -546,7 +643,7 @@ fun EditCurrentBalanceDialog(
 fun TransactionApprovalPopupDialog(
     item: TransactionEntity,
     pendingCount: Int,
-    onApprove: (String, String, String, String) -> Unit,
+    onApprove: (String, String, String, String, Long) -> Unit,
     onDismiss: () -> Unit
 ) {
     var selectedCat by remember(item.id) {
@@ -558,6 +655,7 @@ fun TransactionApprovalPopupDialog(
     var selectedSubCat by remember(item.id, selectedCat) { mutableStateOf(subCatList.first()) }
     var selectedAcc by remember(item.id) { mutableStateOf(item.bankName) }
     var note by remember(item.id) { mutableStateOf(item.merchantOrNote) }
+    var txTimestamp by remember(item.id) { mutableLongStateOf(item.timestamp) }
 
     AlertDialog(
         onDismissRequest = { },
@@ -590,6 +688,11 @@ fun TransactionApprovalPopupDialog(
                         Text(it, color = SlateGray, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
                     }
                 }
+
+                DateTimePickerRow(
+                    timestampMillis = txTimestamp,
+                    onTimestampChange = { txTimestamp = it }
+                )
 
                 Text("Account:", color = SlateGray, fontSize = 12.sp)
                 Row(
@@ -644,7 +747,7 @@ fun TransactionApprovalPopupDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onApprove(selectedCat, selectedSubCat, selectedAcc, note) },
+                onClick = { onApprove(selectedCat, selectedSubCat, selectedAcc, note, txTimestamp) },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black)
             ) {
                 Text("Save Transaction", fontWeight = FontWeight.Bold)
@@ -677,6 +780,7 @@ fun EditTransactionDialog(
     var selectedSubCat by remember(selectedCat) { mutableStateOf(subCatList.first()) }
     var paymentMode by remember { mutableStateOf(tx.paymentMode) }
     var note by remember { mutableStateOf(tx.merchantOrNote.replace(Regex("""^\[.*?\]\s*"""), "")) }
+    var txTimestamp by remember { mutableLongStateOf(tx.timestamp) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -706,6 +810,12 @@ fun EditTransactionDialog(
                 CalculatorAmountField(
                     expression = amountText,
                     onExpressionChange = { amountText = it }
+                )
+
+                // Interactive Calendar Date & HH:mm Time Picker
+                DateTimePickerRow(
+                    timestampMillis = txTimestamp,
+                    onTimestampChange = { txTimestamp = it }
                 )
 
                 Text("Account:", color = SlateGray, fontSize = 12.sp)
@@ -771,7 +881,8 @@ fun EditTransactionDialog(
                             bankName = selectedAcc,
                             category = selectedCat,
                             paymentMode = paymentMode,
-                            merchantOrNote = updatedNote
+                            merchantOrNote = updatedNote,
+                            timestamp = txTimestamp
                         )
                     )
                 },
@@ -835,6 +946,17 @@ fun TransactionsScreen(
     val totalIncome = filteredTx.filter { it.type == "INCOME" && !it.category.contains("Repayment", true) }.sumOf { it.amount }
     val totalExpense = filteredTx.filter { it.type == "EXPENSE" && !it.category.contains("Repayment", true) }.sumOf { it.amount }
 
+    // Calculate Today's Spend for the friendly Quick-Glance Strip
+    val todayStart = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+    val todaySpend = filteredTx.filter { it.type == "EXPENSE" && it.timestamp >= todayStart }.sumOf { it.amount }
+
     val bankTxNet = if (selectedAccountFilter == "All Accounts") {
         val bankOnlyTx = transactions.filter { it.bankName in BANK_ACCOUNTS_ONLY }
         bankOnlyTx.filter { it.type == "INCOME" }.sumOf { it.amount } -
@@ -871,7 +993,7 @@ fun TransactionsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(38.dp)
+                            .size(40.dp)
                             .clip(CircleShape)
                             .background(EmeraldDark),
                         contentAlignment = Alignment.Center
@@ -879,12 +1001,18 @@ fun TransactionsScreen(
                         Text("₹", color = EmeraldGreen, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
                     }
                     Spacer(modifier = Modifier.width(10.dp))
-                    Text("Money Manager", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Column {
+                        Text("Money Manager", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text("Smart Multi-Account Tracker", color = SlateGray, fontSize = 11.sp)
+                    }
                 }
-                TextButton(onClick = { showEditBalanceModal = true }) {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(16.dp))
+                FilledTonalButton(
+                    onClick = { showEditBalanceModal = true },
+                    colors = ButtonDefaults.filledTonalButtonColors(containerColor = CardElevated)
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Set Balance", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Set Balance", color = EmeraldGreen, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
         }
@@ -905,46 +1033,64 @@ fun TransactionsScreen(
             }
         }
 
-        // Balance Summary Card (Clickable to Edit Current Balance)
+        // Friendly Gradient Balance Card + Today's Spend Strip
         item {
             Card(
-                colors = CardDefaults.cardColors(containerColor = EmeraldDark),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(22.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { showEditBalanceModal = true }
             ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Current Balance ($selectedAccountFilter)", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
-                        Surface(
-                            color = Color.Black.copy(alpha = 0.25f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                "Edit Balance ✎",
-                                color = EmeraldGreen,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(Color(0xFF065F46), Color(0xFF111C18))
                             )
+                        )
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Available Balance ($selectedAccountFilter)", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                            Surface(
+                                color = Color.Black.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    "Edit Balance ✎",
+                                    color = EmeraldGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
                         }
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text("₹${String.format("%,.2f", liveBalance)}", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Column {
-                            Text("Credited", color = EmeraldGreen, fontSize = 12.sp)
-                            Text("+₹${String.format("%,.2f", totalIncome)}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        }
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text("Debited / Spent", color = Color(0xFFF87171), fontSize = 12.sp)
-                            Text("-₹${String.format("%,.2f", totalExpense)}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text("₹${String.format("%,.2f", liveBalance)}", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text("Today's Spend", color = SlateGray, fontSize = 11.sp)
+                                Text("₹${String.format("%,.0f", todaySpend)}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            }
+                            Column {
+                                Text("Month Credited", color = EmeraldGreen, fontSize = 11.sp)
+                                Text("+₹${String.format("%,.0f", totalIncome)}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text("Month Spent", color = Color(0xFFF87171), fontSize = 11.sp)
+                                Text("-₹${String.format("%,.0f", totalExpense)}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            }
                         }
                     }
                 }
@@ -972,12 +1118,14 @@ fun TransactionsScreen(
         }
 
         item {
-            Text(
-                "Transaction History (Tap any item to Edit/Delete)",
-                color = SlateGray,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Recent Activity", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text("${filteredTx.size} transactions", color = SlateGray, fontSize = 12.sp)
+            }
         }
 
         if (filteredTx.isEmpty()) {
@@ -995,7 +1143,7 @@ fun TransactionsScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("No Transactions Yet", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text(
-                            "Tap 'Edit Balance ✎' above to enter your current bank balance, or tap '+' to add an expense!",
+                            "Tap '+' below or add the Money Manager Quick-Add Widget to your Nothing Phone home screen!",
                             color = SlateGray,
                             fontSize = 12.sp
                         )
@@ -1023,12 +1171,12 @@ fun TransactionRow(
     onDelete: () -> Unit
 ) {
     val dateStr = remember(tx.timestamp) {
-        SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(tx.timestamp))
+        SimpleDateFormat("dd MMM yyyy • HH:mm", Locale.getDefault()).format(Date(tx.timestamp))
     }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = CardBg),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onEdit() }
@@ -1038,11 +1186,30 @@ fun TransactionRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            // Friendly Category Avatar Badge
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CardElevated),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    tx.category.take(2).uppercase(),
+                    color = EmeraldGreen,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 14.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(tx.category, color = EmeraldGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(tx.merchantOrNote, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Text("${tx.bankName} • ${tx.paymentMode} • $dateStr", color = SlateGray, fontSize = 11.sp)
+                Text("${tx.bankName} • ${tx.paymentMode}", color = SlateGray, fontSize = 11.sp)
+                Text(dateStr, color = SlateGray.copy(alpha = 0.8f), fontSize = 11.sp)
             }
 
             Column(horizontalAlignment = Alignment.End) {
@@ -1208,7 +1375,6 @@ fun BudgetScreen(
             Text("Tap 'Bal ✎' to set your current bank balance, or tap any limit to edit", color = SlateGray, fontSize = 12.sp)
         }
 
-        // CREDIT CARD xx1009 REPAYMENT CARD
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF2E1A29)),
@@ -1477,7 +1643,7 @@ fun SettingsScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         Button(
                             onClick = {
-                                val csvHeader = "Date,Account,Type,Category,Mode,Amount,Note\n"
+                                val csvHeader = "Date_Time,Account,Type,Category,Mode,Amount,Note\n"
                                 val csvRows = transactions.joinToString("\n") {
                                     "${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it.timestamp))},${it.bankName},${it.type},${it.category},${it.paymentMode},${it.amount},\"${it.merchantOrNote}\""
                                 }
@@ -1548,16 +1714,22 @@ fun SettingsScreen(
 
 @Composable
 fun QuickAddTransactionSheet(
-    onSave: (Double, String, String, String, String, String, String) -> Unit
+    initialCategory: String = "Food & Dining",
+    onSave: (Double, String, String, String, String, String, String, Long) -> Unit
 ) {
     var amountExpr by remember { mutableStateOf("") }
     var type by remember { mutableStateOf("EXPENSE") }
-    var category by remember { mutableStateOf(LocalCategoryCatalog.allCategories.first()) }
+    var category by remember {
+        mutableStateOf(
+            if (initialCategory in LocalCategoryCatalog.allCategories) initialCategory else LocalCategoryCatalog.allCategories.first()
+        )
+    }
     val subCategories = LocalCategoryCatalog.getSubCategories(category)
     var subCategory by remember(category) { mutableStateOf(subCategories.first()) }
     var paymentMode by remember { mutableStateOf("UPI") }
     var selectedAccount by remember { mutableStateOf(USER_ACCOUNTS[0]) }
     var note by remember { mutableStateOf("") }
+    var txTimestamp by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     val modes = listOf("UPI", "Credit Card", "Cash", "Bank Transfer")
 
@@ -1590,6 +1762,12 @@ fun QuickAddTransactionSheet(
         CalculatorAmountField(
             expression = amountExpr,
             onExpressionChange = { amountExpr = it }
+        )
+
+        // Interactive Calendar Date & HH:mm Time Picker
+        DateTimePickerRow(
+            timestampMillis = txTimestamp,
+            onTimestampChange = { txTimestamp = it }
         )
 
         Text("Select Account", color = SlateGray, fontSize = 12.sp)
@@ -1663,7 +1841,7 @@ fun QuickAddTransactionSheet(
             onClick = {
                 val amt = LocalMathEvaluator.evaluate(amountExpr) ?: 0.0
                 if (amt > 0) {
-                    onSave(amt, type, category, subCategory, paymentMode, selectedAccount, note)
+                    onSave(amt, type, category, subCategory, paymentMode, selectedAccount, note, txTimestamp)
                 }
             },
             colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color.Black),
